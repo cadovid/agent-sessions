@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.1.26] - 2026-03-01
+
+### Fixed
+- Fix project path resolution for directories with hyphens
+
 ## [0.1.25] - 2026-02-08
 
 ### Fixed
