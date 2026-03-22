@@ -176,13 +176,14 @@ pub fn resume_in_new_tab(session_id: &str, project_path: &str) -> Result<(), Str
     let session = get_zellij_session()
         .ok_or_else(|| "No active Zellij session found".to_string())?;
 
-    // Step 1: create a new tab with the project directory and a recognisable name
+    // Step 1: create a new tab with a unique name (session ID prefix for disambiguation)
+    let tab_name = format!("resume-{}", &session_id[..std::cmp::min(8, session_id.len())]);
     let status = Command::new("zellij")
         .args([
             "--session", &session,
             "action", "new-tab",
             "--cwd", project_path,
-            "--name", "claude-resume",
+            "--name", &tab_name,
         ])
         .status()
         .map_err(|e| format!("Failed to create new Zellij tab: {}", e))?;
