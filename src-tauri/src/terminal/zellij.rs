@@ -138,8 +138,17 @@ fn raise_zellij_terminal_window() {
 
         // Walk up the process tree to find an ancestor with an X11 window
         if let Some(wid) = find_x11_window_in_ancestors(pid) {
+            let wid_str = wid.to_string();
+            // Workaround for GNOME's focus-stealing prevention:
+            // windowactivate alone works for minimized windows but not for
+            // windows behind other windows. Briefly minimizing first forces
+            // GNOME to treat the subsequent activate as an unminimize, which
+            // is always allowed. The minimize is ~50ms and barely visible.
             let _ = Command::new("xdotool")
-                .args(["windowactivate", &wid.to_string()])
+                .args(["windowminimize", "--sync", &wid_str])
+                .output();
+            let _ = Command::new("xdotool")
+                .args(["windowactivate", "--sync", &wid_str])
                 .output();
             return;
         }
