@@ -50,14 +50,49 @@ fn pane_exists_in_layout(layout: &str, pane_name: &str) -> bool {
     layout.contains(&format!("name=\"{}\"", pane_name))
 }
 
-/// Count the number of command panes (non-plugin panes) in the layout.
-fn count_command_panes(layout: &str) -> usize {
-    layout.lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            trimmed.starts_with("pane command=")
-        })
-        .count()
+/// Count the number of command panes (non-plugin panes) in the current tab.
+fn count_command_panes_in_current_tab(layout: &str) -> usize {
+    let mut in_focused_tab = false;
+    let mut count = 0;
+
+    for line in layout.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("tab ") {
+            in_focused_tab = trimmed.contains("focus=true");
+        }
+        if in_focused_tab && trimmed.starts_with("pane command=") {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Find the tab name that contains a pane with the given name.
+/// Returns (tab_name, is_tab_focused).
+fn find_tab_for_pane(layout: &str, pane_name: &str) -> Option<(String, bool)> {
+    let pane_marker = format!("name=\"{}\"", pane_name);
+    let mut current_tab_name: Option<String> = None;
+    let mut current_tab_focused = false;
+
+    for line in layout.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("tab ") {
+            // Extract tab name from: tab name="Tab #1" focus=true ...
+            if let Some(start) = trimmed.find("name=\"") {
+                let after_name = &trimmed[start + 6..];
+                if let Some(end) = after_name.find('"') {
+                    current_tab_name = Some(after_name[..end].to_string());
+                    current_tab_focused = trimmed.contains("focus=true");
+                }
+            }
+        }
+        if trimmed.contains(&pane_marker) {
+            if let Some(ref tab_name) = current_tab_name {
+                return Some((tab_name.clone(), current_tab_focused));
+            }
+        }
+    }
+    None
 }
 
 /// Focus the Zellij pane running the Claude process with the given PID.
@@ -88,16 +123,35 @@ pub fn focus_zellij_pane_by_pid(pid: u32) -> Result<(), String> {
         return Ok(());
     }
 
-    // Cycle focus-next-pane until we land on the target.
-    // Limit iterations to avoid infinite loops.
-    let max_cycles = count_command_panes(&layout) + 2;
+    // Find which tab contains the target pane and switch to it if needed.
+    if let Some((tab_name, tab_focused)) = find_tab_for_pane(&layout, &target_name) {
+        if !tab_focused {
+            let _ = Command::new("zellij")
+                .args(["--session", &session, "action", "go-to-tab-name", &tab_name])
+                .output();
+
+            // Brief pause for Zellij to switch tabs
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    // Re-read layout after potential tab switch
+    let layout = get_layout(&session)?;
+
+    // If the pane is now focused (e.g., it was the only pane in that tab), done.
+    if is_pane_focused(&layout, &target_name) {
+        raise_zellij_terminal_window();
+        return Ok(());
+    }
+
+    // Cycle focus-next-pane within the current tab until we land on the target.
+    let max_cycles = count_command_panes_in_current_tab(&layout) + 2;
 
     for _ in 0..max_cycles {
         let _ = Command::new("zellij")
             .args(["--session", &session, "action", "focus-next-pane"])
             .output();
 
-        // Brief pause for Zellij to update state
         std::thread::sleep(std::time::Duration::from_millis(50));
 
         let new_layout = get_layout(&session)?;
@@ -288,14 +342,41 @@ mod tests {
     }
 
     #[test]
-    fn test_count_command_panes() {
+    fn test_count_command_panes_in_current_tab() {
         let layout = r#"
+    tab name="Tab #1" focus=true {
         pane size=1 borderless=true {
             plugin location="zellij:tab-bar"
         }
         pane command="claude" name="claude-1234" focus=true size="50%" {
         pane command="claude" name="claude-5678" size="50%" {
+    tab name="Tab #2" {
+        pane command="claude" name="claude-9999" {
         "#;
-        assert_eq!(count_command_panes(layout), 2);
+        // Only counts panes in the focused tab
+        assert_eq!(count_command_panes_in_current_tab(layout), 2);
+    }
+
+    #[test]
+    fn test_find_tab_for_pane() {
+        let layout = r#"
+    tab name="Tab #1" focus=true hide_floating_panes=true {
+        pane command="claude" name="claude-1234" focus=true size="50%" {
+        pane command="claude" name="claude-5678" size="50%" {
+    tab name="claude-resume" hide_floating_panes=true {
+        pane command="claude" name="claude-9999" {
+        "#;
+
+        // Pane in first tab (focused)
+        let result = find_tab_for_pane(layout, "claude-1234");
+        assert_eq!(result, Some(("Tab #1".to_string(), true)));
+
+        // Pane in second tab (not focused)
+        let result = find_tab_for_pane(layout, "claude-9999");
+        assert_eq!(result, Some(("claude-resume".to_string(), false)));
+
+        // Non-existent pane
+        let result = find_tab_for_pane(layout, "claude-0000");
+        assert!(result.is_none());
     }
 }
