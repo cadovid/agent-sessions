@@ -1,20 +1,17 @@
 use std::process::Command;
 
 /// Focus the terminal containing the Claude process with the given PID.
-/// Tries tmux (if $TMUX is set), then Zellij (if $ZELLIJ is set).
+/// Tries tmux first, then Zellij. Detection does not rely on environment
+/// variables since the desktop app runs outside the terminal multiplexer.
 pub fn focus_terminal_for_pid(pid: u32) -> Result<(), String> {
-    // Try tmux if we're inside a tmux session
-    if std::env::var("TMUX").is_ok() {
-        if focus_tmux_pane(pid).is_ok() {
-            return Ok(());
-        }
+    // Try tmux — check if tmux is running by attempting list-panes
+    if focus_tmux_pane(pid).is_ok() {
+        return Ok(());
     }
 
-    // Try Zellij if we're inside a Zellij session
-    if std::env::var("ZELLIJ").is_ok() {
-        if super::zellij::focus_zellij_pane_by_pid(pid).is_ok() {
-            return Ok(());
-        }
+    // Try Zellij — detection uses `zellij list-sessions` (works from outside)
+    if super::zellij::focus_zellij_pane_by_pid(pid).is_ok() {
+        return Ok(());
     }
 
     Err("not found: no supported terminal backend".to_string())

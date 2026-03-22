@@ -18,44 +18,104 @@ fn get_parent_pid(pid: u32) -> Option<u32> {
     fields.get(1)?.parse().ok()
 }
 
-/// Focus a Zellij pane by PID, using the pane's name convention "claude-{shell_pid}"
-/// The shell hook names panes using $$ (the shell's PID), so we look up Claude's
-/// parent PID (the shell) and use that to construct the pane name.
-/// Tries `zellij action focus-pane --name <name>` first,
-/// falls back to `zellij action go-to-tab-name <name>` if that fails.
-/// Returns Ok(()) on success, Err(reason) on failure.
+/// Get the first active Zellij session name, or None if no sessions exist.
+/// This works even when called from outside Zellij (e.g., from the desktop app).
+fn get_zellij_session() -> Option<String> {
+    let output = Command::new("zellij")
+        .args(["list-sessions", "-n", "-s"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let sessions = String::from_utf8_lossy(&output.stdout);
+    sessions.lines().next().map(|s| s.trim().to_string())
+}
+
+/// Check if the target pane is already focused by parsing dump-layout output.
+/// Returns true if the pane with the given name has focus=true.
+fn is_pane_focused(layout: &str, pane_name: &str) -> bool {
+    for line in layout.lines() {
+        if line.contains(&format!("name=\"{}\"", pane_name)) && line.contains("focus=true") {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check if the target pane exists in the layout.
+fn pane_exists_in_layout(layout: &str, pane_name: &str) -> bool {
+    layout.contains(&format!("name=\"{}\"", pane_name))
+}
+
+/// Count the number of command panes (non-plugin panes) in the layout.
+fn count_command_panes(layout: &str) -> usize {
+    layout.lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            trimmed.starts_with("pane command=")
+        })
+        .count()
+}
+
+/// Focus the Zellij pane running the Claude process with the given PID.
+///
+/// Strategy: since Zellij 0.43 has no `focus-pane --name` action,
+/// we use `dump-layout` to find the target pane, then cycle through
+/// panes with `focus-next-pane` until the target pane is focused.
 pub fn focus_zellij_pane_by_pid(pid: u32) -> Result<(), String> {
-    // The shell hook uses $$ which is the shell's PID (Claude's parent)
+    let session = get_zellij_session()
+        .ok_or_else(|| "No active Zellij session found".to_string())?;
+
+    // Construct the expected pane name (uses shell's PID, not Claude's)
     let shell_pid = get_parent_pid(pid)
         .ok_or_else(|| format!("Could not determine parent PID for {}", pid))?;
-    let name = pane_name_for_pid(shell_pid);
+    let target_name = pane_name_for_pid(shell_pid);
 
-    // Try focus-pane --name first
-    let focus_result = Command::new("zellij")
-        .args(["action", "focus-pane", "--name", &name])
-        .output()
-        .map_err(|e| format!("Failed to run zellij: {}", e))?;
+    // Get current layout
+    let layout = get_layout(&session)?;
 
-    if focus_result.status.success() {
+    // Check if the pane exists at all
+    if !pane_exists_in_layout(&layout, &target_name) {
+        return Err(format!("Pane '{}' not found in Zellij layout", target_name));
+    }
+
+    // Already focused? Nothing to do.
+    if is_pane_focused(&layout, &target_name) {
         return Ok(());
     }
 
-    // Fall back to go-to-tab-name
-    let tab_result = Command::new("zellij")
-        .args(["action", "go-to-tab-name", &name])
-        .output()
-        .map_err(|e| format!("Failed to run zellij: {}", e))?;
+    // Cycle focus-next-pane until we land on the target.
+    // Limit iterations to avoid infinite loops.
+    let max_cycles = count_command_panes(&layout) + 2;
 
-    if tab_result.status.success() {
-        return Ok(());
+    for _ in 0..max_cycles {
+        let _ = Command::new("zellij")
+            .args(["--session", &session, "action", "focus-next-pane"])
+            .output();
+
+        // Brief pause for Zellij to update state
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let new_layout = get_layout(&session)?;
+        if is_pane_focused(&new_layout, &target_name) {
+            return Ok(());
+        }
     }
 
-    let stderr = String::from_utf8_lossy(&tab_result.stderr);
-    Err(format!(
-        "Failed to focus Zellij pane '{}': {}",
-        name,
-        stderr.trim()
-    ))
+    Err(format!("Could not focus pane '{}' after cycling", target_name))
+}
+
+/// Get the current layout from a Zellij session.
+fn get_layout(session: &str) -> Result<String, String> {
+    let output = Command::new("zellij")
+        .args(["--session", session, "action", "dump-layout"])
+        .output()
+        .map_err(|e| format!("Failed to run zellij dump-layout: {}", e))?;
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 #[cfg(test)]
@@ -71,7 +131,6 @@ mod tests {
 
     #[test]
     fn test_get_parent_pid_self() {
-        // Our own process should have a valid parent
         let our_pid = std::process::id();
         let ppid = get_parent_pid(our_pid);
         assert!(ppid.is_some());
@@ -80,7 +139,37 @@ mod tests {
 
     #[test]
     fn test_get_parent_pid_invalid() {
-        // Non-existent PID should return None
         assert_eq!(get_parent_pid(999999999), None);
+    }
+
+    #[test]
+    fn test_is_pane_focused() {
+        let layout = r#"
+        pane command="claude" name="claude-1234" focus=true size="50%" {
+        pane command="claude" name="claude-5678" size="50%" {
+        "#;
+        assert!(is_pane_focused(layout, "claude-1234"));
+        assert!(!is_pane_focused(layout, "claude-5678"));
+    }
+
+    #[test]
+    fn test_pane_exists_in_layout() {
+        let layout = r#"
+        pane command="claude" name="claude-1234" focus=true size="50%" {
+        "#;
+        assert!(pane_exists_in_layout(layout, "claude-1234"));
+        assert!(!pane_exists_in_layout(layout, "claude-9999"));
+    }
+
+    #[test]
+    fn test_count_command_panes() {
+        let layout = r#"
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane command="claude" name="claude-1234" focus=true size="50%" {
+        pane command="claude" name="claude-5678" size="50%" {
+        "#;
+        assert_eq!(count_command_panes(layout), 2);
     }
 }
