@@ -1,11 +1,25 @@
+// macOS-only modules
+#[cfg(target_os = "macos")]
 mod applescript;
+#[cfg(target_os = "macos")]
 mod iterm;
+#[cfg(target_os = "macos")]
 mod terminal_app;
+#[cfg(target_os = "macos")]
 mod tmux;
 
+// Linux-only modules
+#[cfg(target_os = "linux")]
+mod zellij;
+#[cfg(target_os = "linux")]
+mod linux;
+
+// macOS implementation
+#[cfg(target_os = "macos")]
 use applescript::execute_applescript;
 
 /// Focus the terminal containing the Claude process with the given PID
+#[cfg(target_os = "macos")]
 pub fn focus_terminal_for_pid(pid: u32) -> Result<(), String> {
     // First, get the TTY for this process
     let tty = get_tty_for_pid(pid)?;
@@ -25,6 +39,7 @@ pub fn focus_terminal_for_pid(pid: u32) -> Result<(), String> {
 }
 
 /// Fallback: focus terminal by matching path in session name
+#[cfg(target_os = "macos")]
 pub fn focus_terminal_by_path(path: &str) -> Result<(), String> {
     // Fallback: focus by matching session name (which often contains the path) in iTerm2
     let script = format!(r#"
@@ -54,6 +69,7 @@ pub fn focus_terminal_by_path(path: &str) -> Result<(), String> {
 }
 
 /// Get the TTY device for a given PID using ps command
+#[cfg(target_os = "macos")]
 fn get_tty_for_pid(pid: u32) -> Result<String, String> {
     use std::process::Command;
 
@@ -72,4 +88,15 @@ fn get_tty_for_pid(pid: u32) -> Result<String, String> {
     } else {
         Err("Failed to get TTY for process".to_string())
     }
+}
+
+// Linux implementation — delegates to linux.rs
+#[cfg(target_os = "linux")]
+pub fn focus_terminal_for_pid(pid: u32) -> Result<(), String> {
+    linux::focus_terminal_for_pid(pid)
+}
+
+#[cfg(target_os = "linux")]
+pub fn focus_terminal_by_path(path: &str) -> Result<(), String> {
+    linux::focus_terminal_by_path(path)
 }
