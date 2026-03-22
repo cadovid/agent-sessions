@@ -82,8 +82,9 @@ pub fn focus_zellij_pane_by_pid(pid: u32) -> Result<(), String> {
         return Err(format!("Pane '{}' not found in Zellij layout", target_name));
     }
 
-    // Already focused? Nothing to do.
+    // Already focused? Just raise the terminal window.
     if is_pane_focused(&layout, &target_name) {
+        raise_zellij_terminal_window();
         return Ok(());
     }
 
@@ -101,11 +102,76 @@ pub fn focus_zellij_pane_by_pid(pid: u32) -> Result<(), String> {
 
         let new_layout = get_layout(&session)?;
         if is_pane_focused(&new_layout, &target_name) {
+            raise_zellij_terminal_window();
             return Ok(());
         }
     }
 
     Err(format!("Could not focus pane '{}' after cycling", target_name))
+}
+
+/// Raise and focus the terminal window running the Zellij client.
+///
+/// Finds the Zellij client process (not the server), walks up the process
+/// tree to find the terminal emulator, and uses xdotool to activate its
+/// X11 window. Fails silently if xdotool is not installed or no window is found.
+fn raise_zellij_terminal_window() {
+    // Find Zellij client PIDs (processes running "zellij" without "--server")
+    let output = match Command::new("pgrep").args(["-x", "zellij"]).output() {
+        Ok(o) => o,
+        Err(_) => return,
+    };
+
+    let pids = String::from_utf8_lossy(&output.stdout);
+    for pid_str in pids.lines() {
+        let pid: u32 = match pid_str.trim().parse() {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+
+        // Skip the server process (has --server in its cmdline)
+        if let Ok(cmdline) = std::fs::read_to_string(format!("/proc/{}/cmdline", pid)) {
+            if cmdline.contains("--server") {
+                continue;
+            }
+        }
+
+        // Walk up the process tree to find an ancestor with an X11 window
+        if let Some(wid) = find_x11_window_in_ancestors(pid) {
+            let _ = Command::new("xdotool")
+                .args(["windowactivate", &wid.to_string()])
+                .output();
+            return;
+        }
+    }
+}
+
+/// Walk up the process tree from `pid` and return the first X11 window ID found.
+fn find_x11_window_in_ancestors(start_pid: u32) -> Option<u64> {
+    let mut pid = start_pid;
+    while pid > 1 {
+        // Ask xdotool for windows owned by this PID
+        if let Ok(output) = Command::new("xdotool")
+            .args(["search", "--pid", &pid.to_string()])
+            .output()
+        {
+            if output.status.success() {
+                let wids = String::from_utf8_lossy(&output.stdout);
+                if let Some(wid_str) = wids.lines().next() {
+                    if let Ok(wid) = wid_str.trim().parse::<u64>() {
+                        return Some(wid);
+                    }
+                }
+            }
+        }
+
+        // Move to parent
+        pid = match get_parent_pid(pid) {
+            Some(p) => p,
+            None => break,
+        };
+    }
+    None
 }
 
 /// Get the current layout from a Zellij session.
