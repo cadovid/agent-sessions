@@ -1,8 +1,24 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { ProjectHistory, HistorySession } from '../types/session';
 import { formatTimeAgo } from '@/lib/formatters';
 
 const HISTORY_PANEL_EXPANDED_KEY = 'agent-sessions-history-panel-expanded';
+const HISTORY_PANEL_WIDTH_KEY = 'agent-sessions-history-panel-width';
+const DEFAULT_PANEL_WIDTH = 288;
+const MIN_PANEL_WIDTH = 200;
+const MAX_PANEL_WIDTH = 600;
+
+// Subtle background colors for project groups (dark-mode friendly)
+const GROUP_COLORS = [
+  'rgba(59, 130, 246, 0.06)',   // blue
+  'rgba(168, 85, 247, 0.06)',   // purple
+  'rgba(34, 197, 94, 0.06)',    // green
+  'rgba(234, 179, 8, 0.06)',    // yellow
+  'rgba(239, 68, 68, 0.06)',    // red
+  'rgba(6, 182, 212, 0.06)',    // cyan
+  'rgba(249, 115, 22, 0.06)',   // orange
+  'rgba(236, 72, 153, 0.06)',   // pink
+];
 
 function shortenPath(path: string): string {
   return path.replace(/^\/home\/[^/]+\//, '~/');
@@ -112,11 +128,14 @@ interface ProjectGroupProps {
   isCollapsed: boolean;
   onToggle: (projectPath: string) => void;
   onResumeSession: (sessionId: string, cwd: string) => void;
+  colorIndex: number;
 }
 
-function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession }: ProjectGroupProps) {
+function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, colorIndex }: ProjectGroupProps) {
+  const bgColor = GROUP_COLORS[colorIndex % GROUP_COLORS.length];
+
   return (
-    <div className="mb-1">
+    <div className="mb-1 rounded-md overflow-hidden" style={{ backgroundColor: bgColor }}>
       <button
         onClick={() => onToggle(project.projectPath)}
         className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded hover:bg-muted/30 transition-colors group"
@@ -135,7 +154,7 @@ function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession }: Proje
         </span>
       </button>
       {!isCollapsed && (
-        <div className="ml-2 mt-0.5 space-y-0.5">
+        <div className="ml-4 mr-1 mb-1 space-y-0.5 border-l border-border/40 pl-2">
           {project.sessions.map((session) => (
             <SessionEntry
               key={session.sessionId}
@@ -165,8 +184,68 @@ export function HistoryPanel({
     }
   });
 
+  const [panelWidth, setPanelWidth] = useState<number>(() => {
+    try {
+      const stored = localStorage.getItem(HISTORY_PANEL_WIDTH_KEY);
+      if (stored) {
+        const w = parseInt(stored, 10);
+        if (w >= MIN_PANEL_WIDTH && w <= MAX_PANEL_WIDTH) return w;
+      }
+    } catch { /* ignore */ }
+    return DEFAULT_PANEL_WIDTH;
+  });
+
   const [searchQuery, setSearchQuery] = useState('');
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [isResizing, setIsResizing] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  // Drag-to-resize logic
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  }, []);
+
+  useEffect(() => {
+    if (!isResizing) return;
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!panelRef.current) return;
+      const panelLeft = panelRef.current.getBoundingClientRect().left;
+      const newWidth = Math.min(MAX_PANEL_WIDTH, Math.max(MIN_PANEL_WIDTH, e.clientX - panelLeft));
+      setPanelWidth(newWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+      // Persist width
+      try {
+        localStorage.setItem(HISTORY_PANEL_WIDTH_KEY, String(Math.round(panelWidth)));
+      } catch { /* ignore */ }
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    // Prevent text selection while dragging
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+  }, [isResizing, panelWidth]);
+
+  // Save width when resizing stops (via the state change)
+  useEffect(() => {
+    if (!isResizing) {
+      try {
+        localStorage.setItem(HISTORY_PANEL_WIDTH_KEY, String(Math.round(panelWidth)));
+      } catch { /* ignore */ }
+    }
+  }, [isResizing, panelWidth]);
 
   const handleToggleExpand = useCallback(() => {
     setIsExpanded((prev) => {
@@ -238,8 +317,9 @@ export function HistoryPanel({
   // Expanded panel
   return (
     <div
-      className="flex flex-col border-r border-border bg-card/50"
-      style={{ width: '288px', minWidth: '288px' }}
+      ref={panelRef}
+      className="flex flex-col bg-card/50 relative"
+      style={{ width: `${panelWidth}px`, minWidth: `${MIN_PANEL_WIDTH}px`, maxWidth: `${MAX_PANEL_WIDTH}px` }}
     >
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-3 border-b border-border shrink-0">
@@ -295,16 +375,24 @@ export function HistoryPanel({
           </div>
         )}
 
-        {!isLoading && !error && filteredProjects.map((project) => (
+        {!isLoading && !error && filteredProjects.map((project, index) => (
           <ProjectGroup
             key={project.projectPath}
             project={project}
             isCollapsed={collapsedGroups.has(project.projectPath)}
             onToggle={handleToggleGroup}
             onResumeSession={onResumeSession}
+            colorIndex={index}
           />
         ))}
       </div>
+
+      {/* Resize handle */}
+      <div
+        onMouseDown={handleMouseDown}
+        className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-ring/50 active:bg-ring/70 transition-colors"
+        style={{ zIndex: 10 }}
+      />
     </div>
   );
 }
