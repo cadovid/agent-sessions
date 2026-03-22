@@ -23,3 +23,22 @@ export interface SessionsResponse {
   totalCount: number;
   waitingCount: number;
 }
+
+export interface HistorySession {
+  sessionId: string;
+  cwd: string;
+  lastActivityAt: string;
+  gitBranch: string | null;
+  lastMessage: string | null;
+  lastMessageRole: 'user' | 'assistant' | null;
+}
+
+export interface ProjectHistory {
+  projectPath: string;
+  projectName: string;
+  sessions: HistorySession[];
+}
+
+export interface SessionHistoryResponse {
+  projects: ProjectHistory[];
+}
