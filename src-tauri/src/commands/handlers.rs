@@ -3,6 +3,7 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut};
 use std::sync::Mutex;
 
 use crate::session::{get_sessions, SessionsResponse};
+use crate::session::history;
 use crate::terminal;
 
 // Store current shortcut for unregistration
@@ -110,5 +111,25 @@ pub fn kill_session(pid: u32) -> Result<(), String> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("Failed to kill process {}: {}", pid, stderr))
+    }
+}
+
+/// Get all past Claude sessions grouped by project
+#[tauri::command]
+pub fn get_session_history() -> history::SessionHistoryResponse {
+    history::get_session_history()
+}
+
+/// Resume a past Claude session in a new Zellij tab (Linux only)
+#[tauri::command]
+pub fn resume_session(session_id: String, project_path: String) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        crate::terminal::zellij::resume_in_new_tab(&session_id, &project_path)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (session_id, project_path);
+        Err("Resume session is only supported on Linux with Zellij".to_string())
     }
 }
