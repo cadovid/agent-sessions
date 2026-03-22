@@ -110,6 +110,63 @@ pub fn focus_zellij_pane_by_pid(pid: u32) -> Result<(), String> {
     Err(format!("Could not focus pane '{}' after cycling", target_name))
 }
 
+/// Open a new Zellij tab, change to `project_path`, and run `claude --resume <session_id>`.
+///
+/// Steps:
+/// 1. Looks up the active Zellij session via `get_zellij_session()`.
+/// 2. Creates a new tab with `--cwd <project_path>` named "claude-resume".
+/// 3. Waits 150 ms for the tab shell to initialise.
+/// 4. Sends `claude --resume <session_id>\n` via `write-chars`.
+/// 5. Raises the terminal window via `raise_zellij_terminal_window()`.
+pub fn resume_in_new_tab(session_id: &str, project_path: &str) -> Result<(), String> {
+    let session = get_zellij_session()
+        .ok_or_else(|| "No active Zellij session found".to_string())?;
+
+    // Step 1: create a new tab with the project directory and a recognisable name
+    let status = Command::new("zellij")
+        .args([
+            "--session", &session,
+            "action", "new-tab",
+            "--cwd", project_path,
+            "--name", "claude-resume",
+        ])
+        .status()
+        .map_err(|e| format!("Failed to create new Zellij tab: {}", e))?;
+
+    if !status.success() {
+        return Err(format!(
+            "zellij new-tab exited with status: {}",
+            status
+        ));
+    }
+
+    // Step 2: give the shell a moment to finish initialising
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    // Step 3: type the resume command into the new tab
+    let resume_cmd = format!("claude --resume {}\n", session_id);
+    let status = Command::new("zellij")
+        .args([
+            "--session", &session,
+            "action", "write-chars",
+            &resume_cmd,
+        ])
+        .status()
+        .map_err(|e| format!("Failed to write resume command to Zellij tab: {}", e))?;
+
+    if !status.success() {
+        return Err(format!(
+            "zellij write-chars exited with status: {}",
+            status
+        ));
+    }
+
+    // Step 4: bring the terminal window to the foreground
+    raise_zellij_terminal_window();
+
+    Ok(())
+}
+
 /// Raise and focus the terminal window running the Zellij client.
 ///
 /// Finds the Zellij client process (not the server), walks up the process
