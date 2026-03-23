@@ -32,6 +32,15 @@ export function useSessionHistory() {
     }
   }, []);
 
+  const deleteSession = useCallback(async (sessionId: string, projectDirName: string) => {
+    try {
+      await invoke('delete_history_session', { sessionId, projectDirName });
+      await fetchHistory();
+    } catch (err) {
+      console.error('Failed to delete session:', err);
+    }
+  }, [fetchHistory]);
+
   // Load once on mount
   useEffect(() => {
     fetchHistory();
@@ -44,5 +53,6 @@ export function useSessionHistory() {
     resumeError,
     refresh: fetchHistory,
     resumeSession,
+    deleteSession,
   };
 }

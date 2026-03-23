@@ -1,6 +1,15 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { ProjectHistory, HistorySession } from '../types/session';
 import { formatTimeAgo } from '@/lib/formatters';
+import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from '@/components/ui/dialog';
 
 const HISTORY_PANEL_EXPANDED_KEY = 'agent-sessions-history-panel-expanded';
 const HISTORY_PANEL_WIDTH_KEY = 'agent-sessions-history-panel-width';
@@ -8,17 +17,30 @@ const DEFAULT_PANEL_WIDTH = 288;
 const MIN_PANEL_WIDTH = 200;
 const MAX_PANEL_WIDTH = 600;
 
-// Subtle background colors for project groups (dark-mode friendly)
+// Neon background colors for project groups (dark-mode friendly)
 const GROUP_COLORS = [
-  'rgba(59, 130, 246, 0.06)',   // blue
-  'rgba(168, 85, 247, 0.06)',   // purple
-  'rgba(34, 197, 94, 0.06)',    // green
-  'rgba(234, 179, 8, 0.06)',    // yellow
-  'rgba(239, 68, 68, 0.06)',    // red
-  'rgba(6, 182, 212, 0.06)',    // cyan
-  'rgba(249, 115, 22, 0.06)',   // orange
-  'rgba(236, 72, 153, 0.06)',   // pink
+  'rgba(0, 255, 136, 0.15)',    // neon green
+  'rgba(0, 200, 255, 0.15)',    // neon cyan
+  'rgba(200, 0, 255, 0.15)',    // neon magenta
+  'rgba(255, 0, 128, 0.15)',    // neon pink
+  'rgba(255, 255, 0, 0.12)',    // neon yellow
+  'rgba(255, 100, 0, 0.15)',    // neon orange
+  'rgba(0, 128, 255, 0.15)',    // neon blue
+  'rgba(180, 0, 180, 0.15)',    // neon purple
 ];
+
+const CUSTOM_NAMES_KEY = 'agent-sessions-custom-names';
+
+function getCustomName(sessionId: string): string | null {
+  try {
+    const stored = localStorage.getItem(CUSTOM_NAMES_KEY);
+    if (!stored) return null;
+    const names: Record<string, string> = JSON.parse(stored);
+    return names[sessionId] || null;
+  } catch {
+    return null;
+  }
+}
 
 function shortenPath(path: string): string {
   return path.replace(/^\/home\/[^/]+\//, '~/');
@@ -30,6 +52,7 @@ interface HistoryPanelProps {
   error: string | null;
   resumeError: string | null;
   onResumeSession: (sessionId: string, cwd: string) => void;
+  onDeleteSession: (sessionId: string, projectDirName: string) => void;
 }
 
 function HamburgerIcon() {
@@ -84,42 +107,141 @@ function BranchIcon() {
   );
 }
 
+interface MessagePreviewProps {
+  message: string;
+  anchorRect: DOMRect;
+}
+
+function MessagePreview({ message, anchorRect }: MessagePreviewProps) {
+  const panelWidth = 280;
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
+
+  // Position to the right of anchor; flip left if too close to edge
+  let left = anchorRect.right + 8;
+  if (left + panelWidth > viewportWidth - 8) {
+    left = anchorRect.left - panelWidth - 8;
+  }
+
+  // Align top to anchor, but clamp to viewport
+  let top = anchorRect.top;
+  const maxTop = viewportHeight - 200; // rough min height for panel
+  if (top > maxTop) top = maxTop;
+
+  return createPortal(
+    <div
+      className="fixed z-50 bg-popover border border-border rounded-lg shadow-xl p-3 text-xs text-foreground/80 leading-relaxed pointer-events-none"
+      style={{ left, top, width: panelWidth, maxHeight: 320, overflowY: 'auto' }}
+    >
+      {message}
+    </div>,
+    document.body
+  );
+}
+
 interface SessionEntryProps {
   session: HistorySession;
   onResume: (sessionId: string, cwd: string) => void;
+  onDelete: (sessionId: string) => void;
 }
 
-function SessionEntry({ session, onResume }: SessionEntryProps) {
+function SessionEntry({ session, onResume, onDelete }: SessionEntryProps) {
+  const customName = getCustomName(session.sessionId);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [hoverAnchor, setHoverAnchor] = useState<DOMRect | null>(null);
+  const entryRef = useRef<HTMLDivElement>(null);
+
   const handleClick = useCallback(() => {
     onResume(session.sessionId, session.cwd);
   }, [session.sessionId, session.cwd, onResume]);
 
+  const handleDeleteClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setConfirmOpen(true);
+  }, []);
+
+  const handleConfirmDelete = useCallback(() => {
+    setConfirmOpen(false);
+    onDelete(session.sessionId);
+  }, [session.sessionId, onDelete]);
+
+  const handleMouseEnter = useCallback(() => {
+    if (session.lastMessage && entryRef.current) {
+      setHoverAnchor(entryRef.current.getBoundingClientRect());
+    }
+  }, [session.lastMessage]);
+
+  const handleMouseLeave = useCallback(() => {
+    setHoverAnchor(null);
+  }, []);
+
   return (
-    <button
-      onClick={handleClick}
-      className="w-full text-left px-3 py-2 rounded hover:bg-muted/50 transition-colors group"
-    >
-      {/* Line 1: date + branch */}
-      <div className="flex items-center gap-1.5 min-w-0">
-        <span className="text-xs text-muted-foreground shrink-0">
-          {formatTimeAgo(session.lastActivityAt)}
-        </span>
-        {session.gitBranch && (
-          <>
-            <BranchIcon />
-            <span className="text-xs text-muted-foreground truncate">
-              {session.gitBranch}
+    <>
+      <div className="group relative" ref={entryRef} onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
+        <button
+          onClick={handleClick}
+          className="w-full text-left px-3 py-2 pr-7 rounded hover:bg-muted/50 transition-colors"
+        >
+          {/* Custom name (if set via rename) */}
+          {customName && (
+            <div className="text-xs font-medium text-foreground truncate mb-0.5">
+              {customName}
+            </div>
+          )}
+          {/* Line 1: date + branch */}
+          <div className="flex items-center gap-1.5 min-w-0">
+            <span className="text-xs text-muted-foreground shrink-0">
+              {formatTimeAgo(session.lastActivityAt)}
             </span>
-          </>
+            {session.gitBranch && (
+              <>
+                <BranchIcon />
+                <span className="text-xs text-muted-foreground truncate">
+                  {session.gitBranch}
+                </span>
+              </>
+            )}
+          </div>
+          {/* Lines 2-3: message preview (2 lines) */}
+          <div className="text-xs text-foreground/70 line-clamp-2 mt-0.5 group-hover:text-foreground transition-colors">
+            {session.lastMessage ? session.lastMessage : (
+              <span className="italic text-muted-foreground">No message</span>
+            )}
+          </div>
+        </button>
+        {/* Delete button — appears on hover */}
+        <button
+          onClick={handleDeleteClick}
+          className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 rounded text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 transition-all"
+          title="Delete session"
+        >
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+
+        {/* Hover preview panel */}
+        {hoverAnchor && session.lastMessage && (
+          <MessagePreview message={session.lastMessage} anchorRect={hoverAnchor} />
         )}
       </div>
-      {/* Line 2: message preview */}
-      <div className="text-xs text-foreground/70 truncate mt-0.5 group-hover:text-foreground transition-colors">
-        {session.lastMessage ? session.lastMessage : (
-          <span className="italic text-muted-foreground">No message</span>
-        )}
-      </div>
-    </button>
+
+      {/* Delete confirmation dialog */}
+      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+        <DialogContent onClick={(e) => e.stopPropagation()}>
+          <DialogHeader>
+            <DialogTitle>Delete session?</DialogTitle>
+          </DialogHeader>
+          <p className="text-sm text-muted-foreground py-2">
+            Are you sure you want to remove this session? This will permanently delete the session file from disk.
+          </p>
+          <DialogFooter className="flex gap-2">
+            <Button variant="outline" onClick={() => setConfirmOpen(false)}>No</Button>
+            <Button variant="destructive" onClick={handleConfirmDelete}>Yes, delete</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -128,11 +250,16 @@ interface ProjectGroupProps {
   isCollapsed: boolean;
   onToggle: (projectPath: string) => void;
   onResumeSession: (sessionId: string, cwd: string) => void;
+  onDeleteSession: (sessionId: string, projectDirName: string) => void;
   colorIndex: number;
 }
 
-function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, colorIndex }: ProjectGroupProps) {
+function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDeleteSession, colorIndex }: ProjectGroupProps) {
   const bgColor = GROUP_COLORS[colorIndex % GROUP_COLORS.length];
+
+  const handleDelete = useCallback((sessionId: string) => {
+    onDeleteSession(sessionId, project.projectDirName);
+  }, [onDeleteSession, project.projectDirName]);
 
   return (
     <div className="mb-1 rounded-md overflow-hidden" style={{ backgroundColor: bgColor }}>
@@ -160,6 +287,7 @@ function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, colorIn
               key={session.sessionId}
               session={session}
               onResume={onResumeSession}
+              onDelete={handleDelete}
             />
           ))}
         </div>
@@ -174,6 +302,7 @@ export function HistoryPanel({
   error,
   resumeError,
   onResumeSession,
+  onDeleteSession,
 }: HistoryPanelProps) {
   const [isExpanded, setIsExpanded] = useState<boolean>(() => {
     try {
@@ -286,7 +415,8 @@ export function HistoryPanel({
           (session) =>
             matchesProject ||
             (session.gitBranch?.toLowerCase().includes(q) ?? false) ||
-            (session.lastMessage?.toLowerCase().includes(q) ?? false)
+            (session.lastMessage?.toLowerCase().includes(q) ?? false) ||
+            (getCustomName(session.sessionId)?.toLowerCase().includes(q) ?? false)
         );
 
         return { ...project, sessions: matchedSessions };
@@ -382,6 +512,7 @@ export function HistoryPanel({
             isCollapsed={collapsedGroups.has(project.projectPath)}
             onToggle={handleToggleGroup}
             onResumeSession={onResumeSession}
+            onDeleteSession={onDeleteSession}
             colorIndex={index}
           />
         ))}

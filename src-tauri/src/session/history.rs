@@ -19,6 +19,7 @@ pub struct SessionHistoryResponse {
 pub struct ProjectHistory {
     pub project_path: String,
     pub project_name: String,
+    pub project_dir_name: String,
     pub sessions: Vec<HistorySession>,
 }
 
@@ -55,8 +56,9 @@ fn extract_text_content(value: &serde_json::Value) -> Option<String> {
         _ => None,
     }?;
 
-    if text.chars().count() > 100 {
-        Some(format!("{}...", text.chars().take(100).collect::<String>()))
+    // Cap at 2000 chars — enough for a full hover preview
+    if text.chars().count() > 2000 {
+        Some(format!("{}...", text.chars().take(2000).collect::<String>()))
     } else {
         Some(text)
     }
@@ -259,6 +261,7 @@ pub fn get_session_history() -> SessionHistoryResponse {
         projects.push(ProjectHistory {
             project_path,
             project_name,
+            project_dir_name: dir_name,
             sessions,
         });
     }
@@ -271,6 +274,30 @@ pub fn get_session_history() -> SessionHistoryResponse {
     });
 
     SessionHistoryResponse { projects }
+}
+
+/// Delete a history session's JSONL file (and its subdirectory if present).
+pub fn delete_history_session(session_id: &str, project_dir_name: &str) -> Result<(), String> {
+    let claude_dir = dirs::home_dir()
+        .ok_or("Cannot determine home directory")?
+        .join(".claude")
+        .join("projects")
+        .join(project_dir_name);
+
+    let jsonl_path = claude_dir.join(format!("{}.jsonl", session_id));
+    if jsonl_path.exists() {
+        fs::remove_file(&jsonl_path)
+            .map_err(|e| format!("Failed to delete session file: {}", e))?;
+    }
+
+    // Some sessions also have a subdirectory (e.g. for agent sub-sessions)
+    let dir_path = claude_dir.join(session_id);
+    if dir_path.is_dir() {
+        fs::remove_dir_all(&dir_path)
+            .map_err(|e| format!("Failed to delete session directory: {}", e))?;
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

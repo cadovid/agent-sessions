@@ -120,6 +120,12 @@ pub fn get_session_history() -> history::SessionHistoryResponse {
     history::get_session_history()
 }
 
+/// Delete a past Claude session's JSONL file from ~/.claude/projects/
+#[tauri::command]
+pub fn delete_history_session(session_id: String, project_dir_name: String) -> Result<(), String> {
+    history::delete_history_session(&session_id, &project_dir_name)
+}
+
 /// Resume a past Claude session in a new Zellij tab (Linux only)
 #[tauri::command]
 pub fn resume_session(session_id: String, project_path: String) -> Result<(), String> {

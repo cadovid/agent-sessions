@@ -26,6 +26,7 @@ function App() {
     resumeError,
     refresh: refreshHistory,
     resumeSession,
+    deleteSession,
   } = useSessionHistory();
 
   // Initialize hotkey on app start
@@ -100,6 +101,7 @@ function App() {
           error={historyError}
           resumeError={resumeError}
           onResumeSession={resumeSession}
+          onDeleteSession={deleteSession}
         />
         <div className="flex-1 overflow-y-auto p-6">
           {error ? (

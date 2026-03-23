@@ -33,3 +33,7 @@ release/
 
 # Worktrees
 .worktrees/
+
+# Skills
+.superpowers/
+docs/superpowers/

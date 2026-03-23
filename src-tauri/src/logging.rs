@@ -1,15 +1,24 @@
+#[cfg(debug_assertions)]
 use chrono::Local;
+#[cfg(debug_assertions)]
 use log::{Level, LevelFilter, Metadata, Record, SetLoggerError};
+#[cfg(not(debug_assertions))]
+use log::{LevelFilter, SetLoggerError};
+#[cfg(debug_assertions)]
 use std::fs::{File, OpenOptions};
+#[cfg(debug_assertions)]
 use std::io::Write;
 use std::path::PathBuf;
+#[cfg(debug_assertions)]
 use std::sync::Mutex;
 
+#[cfg(debug_assertions)]
 struct FileLogger {
     file: Mutex<Option<File>>,
     log_path: PathBuf,
 }
 
+#[cfg(debug_assertions)]
 impl FileLogger {
     fn new() -> Self {
         let log_path = get_log_path();
@@ -26,6 +35,7 @@ impl FileLogger {
     }
 }
 
+#[cfg(debug_assertions)]
 impl log::Log for FileLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         metadata.level() <= Level::Debug
@@ -74,6 +84,7 @@ fn get_log_path() -> PathBuf {
     log_dir.join("debug.log")
 }
 
+#[cfg(debug_assertions)]
 static LOGGER: std::sync::OnceLock<FileLogger> = std::sync::OnceLock::new();
 
 /// Initialize the logger. Only logs in debug builds.

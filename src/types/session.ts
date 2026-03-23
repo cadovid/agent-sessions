@@ -36,6 +36,7 @@ export interface HistorySession {
 export interface ProjectHistory {
   projectPath: string;
   projectName: string;
+  projectDirName: string;
   sessions: HistorySession[];
 }
 
