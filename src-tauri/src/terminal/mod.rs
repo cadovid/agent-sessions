@@ -10,7 +10,7 @@ mod tmux;
 
 // Linux-only modules
 #[cfg(target_os = "linux")]
-mod zellij;
+pub mod zellij;
 #[cfg(target_os = "linux")]
 mod linux;
 

@@ -35,6 +35,7 @@ struct OpenCodeProject {
     worktree: String,
     #[serde(default)]
     sandboxes: Vec<String>,
+    #[allow(dead_code)] // deserialized for schema completeness, not yet used in logic
     #[serde(default)]
     time: OpenCodeTime,
 }
@@ -50,6 +51,7 @@ struct OpenCodeTime {
 #[derive(Deserialize)]
 struct OpenCodeSession {
     id: String,
+    #[allow(dead_code)] // deserialized for schema completeness; sessions are found by directory structure
     #[serde(rename = "projectID")]
     project_id: String,
     #[serde(default)]
@@ -63,6 +65,7 @@ struct OpenCodeSession {
 #[derive(Deserialize)]
 struct OpenCodeMessage {
     id: String,
+    #[allow(dead_code)] // deserialized for schema completeness; messages are found by directory structure
     #[serde(rename = "sessionID")]
     session_id: String,
     role: String,
