@@ -347,12 +347,12 @@ mod tests {
 
     #[test]
     fn test_extract_text_content_truncates_long_string() {
-        let long_text = "a".repeat(200);
+        let long_text = "a".repeat(2500);
         let value = serde_json::Value::String(long_text);
         let result = extract_text_content(&value).unwrap();
-        // Should be truncated to 100 chars + "..."
+        // Should be truncated to 2000 chars + "..."
         assert!(result.ends_with("..."));
-        assert_eq!(result.chars().count(), 103); // 100 + "..."
+        assert_eq!(result.chars().count(), 2003); // 2000 + "..."
     }
 
     #[test]
