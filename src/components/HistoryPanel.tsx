@@ -10,6 +10,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog';
+import { Markdown } from './Markdown';
 
 const HISTORY_PANEL_EXPANDED_KEY = 'agent-sessions-history-panel-expanded';
 const HISTORY_PANEL_WIDTH_KEY = 'agent-sessions-history-panel-width';
@@ -107,35 +108,92 @@ function BranchIcon() {
   );
 }
 
-interface MessagePreviewProps {
+interface HoverPreviewProps {
   message: string;
+  role: string;
   anchorRect: DOMRect;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
 }
 
-function MessagePreview({ message, anchorRect }: MessagePreviewProps) {
-  const panelWidth = 280;
+function HoverPreview({ message, role, anchorRect, onMouseEnter, onMouseLeave }: HoverPreviewProps) {
+  const panelWidth = 320;
   const viewportWidth = window.innerWidth;
   const viewportHeight = window.innerHeight;
 
-  // Position to the right of anchor; flip left if too close to edge
   let left = anchorRect.right + 8;
   if (left + panelWidth > viewportWidth - 8) {
     left = anchorRect.left - panelWidth - 8;
   }
 
-  // Align top to anchor, but clamp to viewport
   let top = anchorRect.top;
-  const maxTop = viewportHeight - 200; // rough min height for panel
+  const maxTop = viewportHeight - 200;
   if (top > maxTop) top = maxTop;
 
   return createPortal(
     <div
-      className="fixed z-50 bg-popover border border-border rounded-lg shadow-xl p-3 text-xs text-foreground/80 leading-relaxed pointer-events-none"
-      style={{ left, top, width: panelWidth, maxHeight: 320, overflowY: 'auto' }}
+      className="fixed z-50 bg-popover border border-border rounded-lg shadow-xl p-3"
+      style={{ left, top, width: panelWidth, maxHeight: 400, overflowY: 'auto' }}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
     >
-      {message}
+      <span className={`text-[10px] font-medium uppercase tracking-wider ${role === 'user' ? 'text-blue-400' : 'text-emerald-400'}`}>
+        {role}
+      </span>
+      <div className="text-xs text-foreground/80 leading-relaxed mt-1">
+        <Markdown>{message}</Markdown>
+      </div>
     </div>,
     document.body
+  );
+}
+
+interface MessageLineProps {
+  msg: { text: string; role: string };
+  index: number;
+  isHovered: boolean;
+  hoverRect: DOMRect | null;
+  onHoverEnter: (index: number, rect: DOMRect) => void;
+  onHoverLeave: () => void;
+  onHoverCancel: () => void;
+  onResume: () => void;
+}
+
+function MessageLine({ msg, index, isHovered, hoverRect, onHoverEnter, onHoverLeave, onHoverCancel, onResume }: MessageLineProps) {
+  const lineRef = useRef<HTMLDivElement>(null);
+
+  const handleMouseEnter = useCallback(() => {
+    if (lineRef.current) {
+      onHoverEnter(index, lineRef.current.getBoundingClientRect());
+    }
+  }, [index, onHoverEnter]);
+
+  return (
+    <>
+      <div
+        ref={lineRef}
+        className="py-0.5 cursor-pointer hover:bg-muted/30 rounded px-1"
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={onHoverLeave}
+        onClick={onResume}
+      >
+        <div className="text-xs text-foreground/70 line-clamp-2">
+          <span className={`font-medium ${msg.role === 'user' ? 'text-blue-400/70' : 'text-emerald-400/70'}`}>
+            {msg.role === 'user' ? 'U' : 'A'}:
+          </span>{' '}
+          <Markdown className="inline">{msg.text}</Markdown>
+        </div>
+      </div>
+      {isHovered && hoverRect && (
+        <HoverPreview
+          message={msg.text}
+          role={msg.role}
+          anchorRect={hoverRect}
+          onMouseEnter={onHoverCancel}
+          onMouseLeave={onHoverLeave}
+        />
+      )}
+    </>
   );
 }
 
@@ -148,10 +206,16 @@ interface SessionEntryProps {
 function SessionEntry({ session, onResume, onDelete }: SessionEntryProps) {
   const customName = getCustomName(session.sessionId);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [hoverAnchor, setHoverAnchor] = useState<DOMRect | null>(null);
-  const entryRef = useRef<HTMLDivElement>(null);
+  const [visibleCount, setVisibleCount] = useState(1);
+  // Single active hover: index + rect (only one message hovered at a time)
+  const [activeHover, setActiveHover] = useState<{ index: number; rect: DOMRect } | null>(null);
+  const hoverTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const handleClick = useCallback(() => {
+  const messages = session.recentMessages;
+  const shownMessages = messages.slice(0, visibleCount);
+  const remaining = messages.length - visibleCount;
+
+  const handleResume = useCallback(() => {
     onResume(session.sessionId, session.cwd);
   }, [session.sessionId, session.cwd, onResume]);
 
@@ -165,64 +229,111 @@ function SessionEntry({ session, onResume, onDelete }: SessionEntryProps) {
     onDelete(session.sessionId);
   }, [session.sessionId, onDelete]);
 
-  const handleMouseEnter = useCallback(() => {
-    if (session.lastMessage && entryRef.current) {
-      setHoverAnchor(entryRef.current.getBoundingClientRect());
-    }
-  }, [session.lastMessage]);
+  const handleShowMore = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setVisibleCount((prev) => Math.min(prev + 5, messages.length));
+  }, [messages.length]);
 
-  const handleMouseLeave = useCallback(() => {
-    setHoverAnchor(null);
+  const handleCollapse = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setVisibleCount(1);
+  }, []);
+
+  const handleHoverEnter = useCallback((index: number, rect: DOMRect) => {
+    if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
+    setActiveHover({ index, rect });
+  }, []);
+
+  const handleHoverLeave = useCallback(() => {
+    hoverTimeout.current = setTimeout(() => setActiveHover(null), 150);
+  }, []);
+
+  const handleHoverCancel = useCallback(() => {
+    if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
   }, []);
 
   return (
     <>
-      <div className="group relative" ref={entryRef} onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
-        <button
-          onClick={handleClick}
-          className="w-full text-left px-3 py-2 pr-7 rounded hover:bg-muted/50 transition-colors"
-        >
-          {/* Custom name (if set via rename) */}
-          {customName && (
-            <div className="text-xs font-medium text-foreground truncate mb-0.5">
-              {customName}
+      <div className="group relative">
+        {/* Session header: name, date, branch, delete */}
+        <div className="flex items-start px-3 py-2 pr-7">
+          <button
+            onClick={handleResume}
+            className="flex-1 min-w-0 text-left hover:opacity-80 transition-opacity"
+          >
+            {customName && (
+              <div className="text-xs font-medium text-orange-400 truncate mb-0.5">
+                {customName}
+              </div>
+            )}
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="text-xs text-muted-foreground shrink-0">
+                {formatTimeAgo(session.lastActivityAt)}
+              </span>
+              {session.gitBranch && (
+                <>
+                  <BranchIcon />
+                  <span className="text-xs text-muted-foreground truncate">
+                    {session.gitBranch}
+                  </span>
+                </>
+              )}
             </div>
-          )}
-          {/* Line 1: date + branch */}
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span className="text-xs text-muted-foreground shrink-0">
-              {formatTimeAgo(session.lastActivityAt)}
-            </span>
-            {session.gitBranch && (
-              <>
-                <BranchIcon />
-                <span className="text-xs text-muted-foreground truncate">
-                  {session.gitBranch}
-                </span>
-              </>
-            )}
-          </div>
-          {/* Lines 2-3: message preview (2 lines) */}
-          <div className="text-xs text-foreground/70 line-clamp-2 mt-0.5 group-hover:text-foreground transition-colors">
-            {session.lastMessage ? session.lastMessage : (
-              <span className="italic text-muted-foreground">No message</span>
-            )}
-          </div>
-        </button>
-        {/* Delete button — appears on hover */}
-        <button
-          onClick={handleDeleteClick}
-          className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 rounded text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 transition-all"
-          title="Delete session"
-        >
-          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
+          </button>
+          {/* Delete button */}
+          <button
+            onClick={handleDeleteClick}
+            className="shrink-0 p-0.5 rounded text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 transition-all mt-0.5"
+            title="Delete session"
+          >
+            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
 
-        {/* Hover preview panel */}
-        {hoverAnchor && session.lastMessage && (
-          <MessagePreview message={session.lastMessage} anchorRect={hoverAnchor} />
+        {/* Messages section — indented under the header */}
+        {messages.length > 0 && (
+          <div className="ml-5 mr-2 mb-1 border-l border-border/30 pl-2">
+            {/* Visible messages */}
+            {shownMessages.map((msg, i) => (
+              <MessageLine
+                key={i}
+                msg={msg}
+                index={i}
+                isHovered={activeHover?.index === i}
+                hoverRect={activeHover?.index === i ? activeHover.rect : null}
+                onHoverEnter={handleHoverEnter}
+                onHoverLeave={handleHoverLeave}
+                onHoverCancel={handleHoverCancel}
+                onResume={handleResume}
+              />
+            ))}
+
+            {/* "+N more" / "collapse" toggle */}
+            {remaining > 0 && (
+              <button
+                onClick={handleShowMore}
+                className="ml-1 my-0.5 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+              >
+                +{Math.min(remaining, 5)} more
+              </button>
+            )}
+            {visibleCount > 1 && (
+              <button
+                onClick={handleCollapse}
+                className="ml-1 my-0.5 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+              >
+                collapse
+              </button>
+            )}
+          </div>
+        )}
+
+        {messages.length === 0 && (
+          <div className="ml-5 mr-2 mb-1 pl-2 text-xs italic text-muted-foreground">
+            No messages
+          </div>
         )}
       </div>
 
@@ -415,7 +526,7 @@ export function HistoryPanel({
           (session) =>
             matchesProject ||
             (session.gitBranch?.toLowerCase().includes(q) ?? false) ||
-            (session.lastMessage?.toLowerCase().includes(q) ?? false) ||
+            session.recentMessages.some((m) => m.text.toLowerCase().includes(q)) ||
             (getCustomName(session.sessionId)?.toLowerCase().includes(q) ?? false)
         );
 

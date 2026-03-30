@@ -31,8 +31,15 @@ pub struct HistorySession {
     pub cwd: String,
     pub last_activity_at: String,
     pub git_branch: Option<String>,
-    pub last_message: Option<String>,
-    pub last_message_role: Option<String>,
+    pub recent_messages: Vec<MessagePreview>,
+}
+
+/// A single message preview (text + role)
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessagePreview {
+    pub text: String,
+    pub role: String,
 }
 
 /// Extract text content from a serde_json::Value.
@@ -76,8 +83,8 @@ fn read_last_lines(path: &PathBuf, n: usize) -> Vec<String> {
         Err(_) => return Vec::new(),
     };
 
-    // Seek back up to 64KB from end
-    let seek_pos = file_len.saturating_sub(65536);
+    // Seek back up to 256KB from end (enough for ~500 lines)
+    let seek_pos = file_len.saturating_sub(262144);
     if file.seek(SeekFrom::Start(seek_pos)).is_err() {
         return Vec::new();
     }
@@ -108,13 +115,12 @@ fn parse_history_session(jsonl_path: &PathBuf) -> Option<HistorySession> {
         .and_then(|s| s.to_str())
         .map(String::from)?;
 
-    // Read last ~20 lines for timestamp, git_branch, last_message, last_message_role
-    let last_lines = read_last_lines(jsonl_path, 20);
+    // Read last ~500 lines to find timestamp, git_branch, and up to 20 recent messages
+    let last_lines = read_last_lines(jsonl_path, 500);
 
     let mut last_activity_at: Option<String> = None;
     let mut git_branch: Option<String> = None;
-    let mut last_message: Option<String> = None;
-    let mut last_message_role: Option<String> = None;
+    let mut recent_messages: Vec<MessagePreview> = Vec::new();
 
     for line in &last_lines {
         if let Ok(msg) = serde_json::from_str::<JsonlMessage>(line) {
@@ -124,13 +130,13 @@ fn parse_history_session(jsonl_path: &PathBuf) -> Option<HistorySession> {
             if git_branch.is_none() {
                 git_branch = msg.git_branch.clone();
             }
-            // Find last meaningful message content
-            if last_message.is_none() {
+            // Collect up to 20 meaningful messages (most recent first)
+            if recent_messages.len() < 20 {
                 if let Some(content) = &msg.message {
                     if let Some(c) = &content.content {
                         if let Some(text) = extract_text_content(c) {
-                            last_message = Some(text);
-                            last_message_role = content.role.clone();
+                            let role = content.role.clone().unwrap_or_else(|| "unknown".to_string());
+                            recent_messages.push(MessagePreview { text, role });
                         }
                     }
                 }
@@ -173,8 +179,7 @@ fn parse_history_session(jsonl_path: &PathBuf) -> Option<HistorySession> {
         cwd,
         last_activity_at: last_activity_at.unwrap_or_else(|| "Unknown".to_string()),
         git_branch,
-        last_message,
-        last_message_role,
+        recent_messages,
     })
 }
 
