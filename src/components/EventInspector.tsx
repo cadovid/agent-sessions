@@ -13,6 +13,7 @@ interface EventInspectorProps {
   sessionLabel: string;
   accentColor?: string;
   isLive?: boolean;
+  agentId?: string;
 }
 
 const EVENT_TYPE_CONFIG: Record<string, { label: string; color: string; accent: string }> = {
@@ -40,7 +41,50 @@ function getEventTypeKey(event: SessionEvent): string {
 }
 
 type FilterType = 'all' | 'user' | 'assistant' | 'tool' | 'system';
+type SemanticType = 'none' | 'code' | 'plan' | 'diff';
 type ViewMode = 'timeline' | 'raw';
+
+const CODE_TOOLS = new Set(['Edit', 'Write', 'Bash', 'Read', 'Grep', 'Glob', 'Agent']);
+const DIFF_TOOLS = new Set(['Edit']);
+
+// Detect semantic type from raw JSON (tool name) and content preview
+function detectSemanticType(event: SessionEvent): SemanticType {
+  // Parse tool name from rawJson for tool_use events
+  if (event.eventType === 'tool_use' || event.eventType === 'tool_result') {
+    try {
+      const parsed = JSON.parse(event.rawJson);
+      const content = parsed?.message?.content;
+      if (Array.isArray(content)) {
+        for (const block of content) {
+          if (block.type === 'tool_use') {
+            const name = block.name ?? '';
+            if (DIFF_TOOLS.has(name)) return 'diff';
+            if (CODE_TOOLS.has(name)) return 'code';
+          }
+          if (block.type === 'tool_result') {
+            // Tool results inherit the type from what they respond to
+            return 'code';
+          }
+        }
+      }
+    } catch { /* ignore parse errors */ }
+    return 'code'; // tool events are code by default
+  }
+
+  // Detect plan in assistant text
+  if (event.role === 'assistant' && event.contentPreview) {
+    const text = event.contentPreview;
+    // Count plan indicators: markdown headers and numbered steps
+    let indicators = 0;
+    if (/^#{1,3}\s/m.test(text)) indicators++;
+    if (/^\d+\.\s/m.test(text)) indicators++;
+    if (/\*\*Step\s/i.test(text)) indicators++;
+    if (/## (Plan|Implementation|Changes|Summary)/i.test(text)) indicators += 2;
+    if (indicators >= 2) return 'plan';
+  }
+
+  return 'none';
+}
 
 function formatTimestamp(ts: string | null): string {
   if (!ts) return '';
@@ -90,21 +134,31 @@ function PrettyJson({ json, query }: { json: string; query?: string }) {
   );
 }
 
+const SEMANTIC_BADGE: Record<string, { label: string; color: string } | null> = {
+  code: { label: 'Code', color: 'text-cyan-400/70' },
+  plan: { label: 'Plan', color: 'text-violet-400/70' },
+  diff: { label: 'Diff', color: 'text-orange-400/70' },
+  none: null,
+};
+
 const EventRow = memo(function EventRow({
   event,
   isSelected,
   onClick,
   rowIndex,
   searchQuery,
+  semanticType,
 }: {
   event: SessionEvent;
   isSelected: boolean;
   onClick: () => void;
   rowIndex: number;
   searchQuery: string;
+  semanticType: SemanticType;
 }) {
   const config = getEventConfig(event);
   const zebra = rowIndex % 2 === 1 ? 'bg-white/[0.02]' : '';
+  const semBadge = SEMANTIC_BADGE[semanticType];
   return (
     <button
       data-event-index={event.index}
@@ -119,6 +173,11 @@ const EventRow = memo(function EventRow({
           <span className={`text-[9px] font-medium px-1.5 py-0.5 rounded border ${config.color}`}>
             {config.label}
           </span>
+          {semBadge && (
+            <span className={`text-[8px] font-medium ${semBadge.color}`}>
+              {semBadge.label}
+            </span>
+          )}
           <span className="text-[10px] text-muted-foreground">
             {formatTimestamp(event.timestamp)}
           </span>
@@ -142,12 +201,13 @@ function useDebouncedValue<T>(value: T, delay: number): T {
   return debounced;
 }
 
-export function EventInspector({ open, onClose, sessionId, projectDirName, sessionLabel, accentColor, isLive }: EventInspectorProps) {
+export function EventInspector({ open, onClose, sessionId, projectDirName, sessionLabel, accentColor, isLive, agentId }: EventInspectorProps) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
   const [filter, setFilter] = useState<FilterType>('all');
+  const [semanticFilter, setSemanticFilter] = useState<SemanticType | 'all'>('all');
   const [viewMode, setViewMode] = useState<ViewMode>('timeline');
   const [searchQuery, setSearchQuery] = useState('');
   const debouncedSearch = useDebouncedValue(searchQuery, 200);
@@ -257,10 +317,10 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
 
   // Load events
   const loadEvents = useCallback(() => {
-    return invoke<SessionEvent[]>('get_session_events', { sessionId, projectDirName })
+    return invoke<SessionEvent[]>('get_session_events', { sessionId, projectDirName, agentId: agentId || null })
       .then(setEvents)
       .catch((e) => setError(String(e)));
-  }, [sessionId, projectDirName]);
+  }, [sessionId, projectDirName, agentId]);
 
   useEffect(() => {
     if (!open) return;
@@ -280,18 +340,20 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
     return () => clearInterval(interval);
   }, [open, isLive, loadEvents]);
 
-  // Pre-compute search data
+  // Pre-compute search data + semantic types (once per load)
   const searchableEvents = useMemo(() =>
     events.map((e) => ({
       event: e,
       lowerPreview: e.contentPreview?.toLowerCase() ?? '',
       lowerRaw: e.rawJson.toLowerCase(),
+      semantic: detectSemanticType(e),
     })),
     [events]
   );
 
   const filteredEvents = useMemo(() => {
     let result = searchableEvents;
+    // Role filter
     if (filter !== 'all') {
       result = result.filter(({ event: e }) => {
         switch (filter) {
@@ -303,17 +365,22 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
         }
       });
     }
+    // Semantic filter
+    if (semanticFilter !== 'all') {
+      result = result.filter(({ semantic }) => semantic === semanticFilter);
+    }
+    // Search filter
     if (debouncedSearch.trim()) {
       const q = debouncedSearch.toLowerCase();
       result = result.filter(({ lowerPreview, lowerRaw }) => lowerPreview.includes(q) || lowerRaw.includes(q));
     }
-    return result.map(({ event }) => event).reverse();
-  }, [searchableEvents, filter, debouncedSearch]);
+    return result.map(({ event, semantic }) => ({ event, semantic })).reverse();
+  }, [searchableEvents, filter, semanticFilter, debouncedSearch]);
 
   // Navigation: counts per type
   const typeCounts = useMemo(() => {
     const counts = { user: 0, assistant: 0, tool: 0, system: 0 };
-    for (const e of filteredEvents) {
+    for (const { event: e } of filteredEvents) {
       const key = getEventTypeKey(e);
       if (key in counts) counts[key as keyof typeof counts]++;
     }
@@ -323,11 +390,11 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
   // Navigate to next/prev event of a given type
   const navigateTo = useCallback((typeKey: string, direction: 'next' | 'prev') => {
     const currentPos = selectedIndex !== null
-      ? filteredEvents.findIndex((e) => e.index === selectedIndex)
+      ? filteredEvents.findIndex(({ event: e }) => e.index === selectedIndex)
       : -1;
 
     const candidates = filteredEvents
-      .map((e, i) => ({ event: e, pos: i }))
+      .map(({ event: e }, i) => ({ event: e, pos: i }))
       .filter(({ event }) => getEventTypeKey(event) === typeKey);
 
     if (candidates.length === 0) return;
@@ -363,12 +430,38 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
     }
   }, [selectedEvent, viewMode]);
 
+  // Semantic counts (from the role-filtered set, before semantic filter is applied)
+  const semanticCounts = useMemo(() => {
+    const counts = { code: 0, plan: 0, diff: 0 };
+    for (const { event: e, semantic } of searchableEvents) {
+      // Apply role filter only (not semantic filter) to count semantic types
+      if (filter !== 'all') {
+        const role = e.role;
+        const pass = filter === 'user' ? (role === 'user' || role === 'human')
+          : filter === 'assistant' ? role === 'assistant'
+          : filter === 'tool' ? (e.eventType === 'tool_use' || e.eventType === 'tool_result')
+          : filter === 'system' ? (!role && e.eventType !== 'tool_use' && e.eventType !== 'tool_result')
+          : true;
+        if (!pass) continue;
+      }
+      if (semantic !== 'none') counts[semantic]++;
+    }
+    return counts;
+  }, [searchableEvents, filter]);
+
   const typeFilters: { key: FilterType; label: string }[] = [
     { key: 'all', label: 'All' },
     { key: 'user', label: 'User' },
     { key: 'assistant', label: 'Assistant' },
     { key: 'tool', label: 'Tools' },
     { key: 'system', label: 'System' },
+  ];
+
+  const semanticFilters: { key: SemanticType | 'all'; label: string; count: number; accent: string }[] = [
+    { key: 'all', label: 'Any', count: 0, accent: '' },
+    { key: 'code', label: 'Code', count: semanticCounts.code, accent: '#06b6d4' },
+    { key: 'plan', label: 'Plan', count: semanticCounts.plan, accent: '#8b5cf6' },
+    { key: 'diff', label: 'Diff', count: semanticCounts.diff, accent: '#f97316' },
   ];
 
   const navPills: { key: string; label: string; count: number; accent: string }[] = [
@@ -431,7 +524,7 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
 
         {/* Toolbar: filters + search + view toggle */}
         <div className="flex items-center justify-between px-4 py-2 border-b border-border shrink-0 gap-2" style={{ backgroundColor: 'rgba(255, 255, 255, 0.04)' }}>
-          <div className="flex gap-1 shrink-0">
+          <div className="flex gap-1 shrink-0 items-center">
             {typeFilters.map((f) => (
               <button
                 key={f.key}
@@ -441,6 +534,21 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
                 }`}
               >
                 {f.label}
+              </button>
+            ))}
+            <div className="w-px h-4 bg-border/50 mx-1" />
+            {semanticFilters.map((f) => (
+              <button
+                key={f.key}
+                onClick={() => setSemanticFilter(f.key)}
+                className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
+                  semanticFilter === f.key
+                    ? f.accent ? `text-foreground` : 'bg-foreground/15 text-foreground'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                }`}
+                style={semanticFilter === f.key && f.accent ? { backgroundColor: `${f.accent}30`, color: f.accent } : undefined}
+              >
+                {f.key === 'all' ? f.label : `${f.label} ${f.count}`}
               </button>
             ))}
           </div>
@@ -515,7 +623,7 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
             {error && (
               <div className="m-3 px-2 py-1.5 rounded bg-destructive/10 text-destructive text-xs">{error}</div>
             )}
-            {!isLoading && !error && filteredEvents.map((event, i) => (
+            {!isLoading && !error && filteredEvents.map(({ event, semantic }, i) => (
               <EventRow
                 key={event.index}
                 event={event}
@@ -523,6 +631,7 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
                 onClick={() => setSelectedIndex(event.index)}
                 rowIndex={i}
                 searchQuery={debouncedSearch}
+                semanticType={semantic}
               />
             ))}
           </div>

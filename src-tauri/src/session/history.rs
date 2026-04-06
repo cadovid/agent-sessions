@@ -32,6 +32,7 @@ pub struct HistorySession {
     pub last_activity_at: String,
     pub git_branch: Option<String>,
     pub recent_messages: Vec<MessagePreview>,
+    pub subagents: Vec<SubagentInfo>,
 }
 
 /// A single message preview (text + role)
@@ -40,6 +41,17 @@ pub struct HistorySession {
 pub struct MessagePreview {
     pub text: String,
     pub role: String,
+}
+
+/// Info about a subagent spawned by a session
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentInfo {
+    pub agent_id: String,
+    pub slug: Option<String>,
+    pub task_description: Option<String>,
+    pub timestamp: Option<String>,
+    pub event_count: usize,
 }
 
 /// Extract text content from a serde_json::Value.
@@ -108,6 +120,107 @@ fn read_first_lines(path: &PathBuf, n: usize) -> Vec<String> {
     reader.lines().take(n).flatten().collect()
 }
 
+/// Scan the subagents directory for a session and return info about each subagent.
+/// Only reads the first line of each subagent file for metadata (fast).
+fn scan_subagents(parent_jsonl: &PathBuf, session_id: &str) -> Vec<SubagentInfo> {
+    // Subagents are at <parent_dir>/<session_id>/subagents/agent-*.jsonl
+    let parent_dir = match parent_jsonl.parent() {
+        Some(d) => d,
+        None => return Vec::new(),
+    };
+    let subagents_dir = parent_dir.join(session_id).join("subagents");
+    if !subagents_dir.is_dir() {
+        return Vec::new();
+    }
+
+    let entries = match fs::read_dir(&subagents_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut subagents: Vec<SubagentInfo> = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !name.starts_with("agent-") || !name.ends_with(".jsonl") {
+            continue;
+        }
+
+        // Count lines for event_count (use metadata file size as proxy for speed)
+        let event_count = match File::open(&path) {
+            Ok(f) => BufReader::new(f).lines().count(),
+            Err(_) => 0,
+        };
+
+        // Read first line for metadata
+        let first_lines = read_first_lines(&path, 2);
+        let mut agent_id: Option<String> = None;
+        let mut slug: Option<String> = None;
+        let mut timestamp: Option<String> = None;
+        let mut task_description: Option<String> = None;
+
+        for line in &first_lines {
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(line) {
+                if agent_id.is_none() {
+                    agent_id = parsed.get("agentId")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                }
+                if slug.is_none() {
+                    slug = parsed.get("slug")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                }
+                if timestamp.is_none() {
+                    timestamp = parsed.get("timestamp")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                }
+                if task_description.is_none() {
+                    if let Some(msg) = parsed.get("message") {
+                        if let Some(content) = msg.get("content") {
+                            task_description = extract_text_content(content);
+                        }
+                    }
+                }
+            }
+        }
+
+        let agent_id = match agent_id {
+            Some(id) => id,
+            None => name.strip_prefix("agent-").unwrap_or(name)
+                .strip_suffix(".jsonl").unwrap_or(name).to_string(),
+        };
+
+        // Truncate task description for preview
+        let task_description = task_description.map(|t| {
+            if t.chars().count() > 200 {
+                format!("{}...", t.chars().take(200).collect::<String>())
+            } else {
+                t
+            }
+        });
+
+        subagents.push(SubagentInfo {
+            agent_id,
+            slug,
+            task_description,
+            timestamp,
+            event_count,
+        });
+    }
+
+    // Sort by timestamp descending (newest first)
+    subagents.sort_by(|a, b| {
+        let a_ts = a.timestamp.as_deref().unwrap_or("");
+        let b_ts = b.timestamp.as_deref().unwrap_or("");
+        b_ts.cmp(a_ts)
+    });
+
+    subagents
+}
+
 /// Parse a single JSONL session file and return a HistorySession.
 fn parse_history_session(jsonl_path: &PathBuf) -> Option<HistorySession> {
     let session_id = jsonl_path
@@ -174,12 +287,16 @@ fn parse_history_session(jsonl_path: &PathBuf) -> Option<HistorySession> {
 
     let cwd = cwd.unwrap_or_default();
 
+    // Scan for subagents in <session_id>/subagents/ directory
+    let subagents = scan_subagents(jsonl_path, &session_id);
+
     Some(HistorySession {
         session_id,
         cwd,
         last_activity_at: last_activity_at.unwrap_or_else(|| "Unknown".to_string()),
         git_branch,
         recent_messages,
+        subagents,
     })
 }
 
@@ -460,8 +577,33 @@ fn parse_jsonl_events(jsonl_path: &PathBuf) -> Result<Vec<SessionEvent>, String>
 /// Read all events from a session JSONL file for the Event Inspector.
 /// If `project_dir_name` is provided, looks in that specific directory.
 /// If empty, scans all project directories for the session ID.
-pub fn get_session_events(session_id: &str, project_dir_name: &str) -> Result<Vec<SessionEvent>, String> {
+/// If `agent_id` is provided, looks for the subagent file instead.
+pub fn get_session_events(session_id: &str, project_dir_name: &str, agent_id: &str) -> Result<Vec<SessionEvent>, String> {
     let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+
+    // If agent_id is provided, look for subagent file
+    if !agent_id.is_empty() {
+        let subagent_filename = format!("agent-{}.jsonl", agent_id);
+        let subagent_path = home.join(".claude").join("projects")
+            .join(project_dir_name).join(session_id).join("subagents").join(&subagent_filename);
+        if subagent_path.exists() {
+            return parse_jsonl_events(&subagent_path);
+        }
+        // Scan all project dirs if project_dir_name is empty
+        if project_dir_name.is_empty() {
+            let projects_dir = home.join(".claude").join("projects");
+            if let Ok(entries) = fs::read_dir(&projects_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path().join(session_id).join("subagents").join(&subagent_filename);
+                    if path.exists() {
+                        return parse_jsonl_events(&path);
+                    }
+                }
+            }
+        }
+        return Err("Subagent file not found".to_string());
+    }
+
     let filename = format!("{}.jsonl", session_id);
 
     // If project_dir_name is provided, look directly
