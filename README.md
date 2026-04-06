@@ -1,45 +1,122 @@
 # Agent Sessions
 
-[![GitHub release](https://img.shields.io/github/v/release/ozankasikci/agent-sessions)](https://github.com/ozankasikci/agent-sessions/releases)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/cadovid/agent-sessions/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![macOS](https://img.shields.io/badge/macOS-Monterey%2B-black)](https://github.com/ozankasikci/agent-sessions/releases)
-[![Homebrew](https://img.shields.io/badge/Homebrew-available-orange)](https://github.com/ozankasikci/homebrew-tap)
+[![Linux](https://img.shields.io/badge/Linux-AppImage-yellow)](https://github.com/cadovid/agent-sessions/releases)
+[![Tauri](https://img.shields.io/badge/Tauri-2.x-orange)](https://tauri.app)
 
-A macOS desktop app to monitor your AI coding agents in real-time.
-
-![Demo](demo/claude-sessions-demo.gif)
-
-## Supported Agents
-
-- **Claude Code** - Anthropic's official CLI for Claude
-- **OpenCode** - Open-source AI coding assistant
+A desktop app to monitor, browse, and inspect your Claude Code sessions in real-time. Built with Tauri 2.x for Linux (with Zellij/tmux support) and macOS.
 
 ## Features
 
-- View all active coding agent sessions in one place
+### Active Session Monitoring
+- View all running Claude Code sessions in one place
 - Real-time status detection (Thinking, Processing, Waiting, Idle)
-- Global hotkey to toggle visibility (default: `Ctrl+Space`, configurable)
-- Click to focus on a specific session's terminal
-- Custom session names (rename via kebab menu)
-- Quick access URL for each session (e.g., dev server links)
+- Filter tabs: All / Active / Idle
+- Full message preview with markdown rendering and collapsible "show more"
+- Click to focus on a session's terminal (Zellij pane switching, tmux select-pane)
+- Custom session names, URLs, and GitHub links via dropdown menu
+- Kill sessions directly from the app
+- Global hotkey to toggle visibility (configurable)
 
-> **Note:** Currently supports macOS only with iTerm2 and Terminal. Support for other terminals coming soon.
+### Session History Panel
+- Collapsible left panel showing all past sessions from `~/.claude/projects/`
+- Two grouping modes: **By Project** and **By Date** (toggle in header)
+- Smart date labels: "Today 14:32", "Yesterday 09:15", "Mar 28 16:45"
+- Date section headers within project groups
+- Search across project names, branches, messages, and custom names
+- Drag-to-resize panel (200-600px)
+- Per-session actions: resume in new Zellij tab, star/favorite, inspect, delete (with confirmation)
+
+### Event Inspector
+- Full JSONL event viewer for any session (history or active)
+- Draggable, resizable floating panel with split-pane layout
+- Role filters: All / User / Assistant / Tools / System
+- Semantic type filters: Code / Plan / Diff (auto-detected from tool usage and content patterns)
+- Navigation pills to jump between event types (User, Assistant, Tool, System)
+- Search with match highlighting (yellow) in event list, detail panel, and raw JSON
+- Pretty view (markdown rendered) and Raw JSON view with copy-to-clipboard
+- Live refresh (3-second polling) for active sessions with LIVE indicator
+
+### Subagent Hierarchy
+- Detects parent-child relationships from `<session>/subagents/` directories
+- Collapsible tree showing each subagent's slug name, task description, and event count
+- Click any subagent to open its events in the Event Inspector
+- Progressive loading (10 at a time) for sessions with many subagents
+
+### Favorites and Archiving
+- Star sessions for quick access (amber star icon)
+- Starring automatically archives the session to `~/.local/share/agent-sessions/archives/`
+- Archived sessions always appear even if `~/.claude/` is cleaned up
+- Favorites filter toggle in the history panel header
+
+### Transcript Linkification
+- URLs in messages are clickable (opens in default browser)
+- Absolute file paths (e.g., `/home/.../file.rs`) are auto-detected and clickable (opens in `$EDITOR`, `$VISUAL`, or `xdg-open`)
+- File paths render in green, URLs in blue
+
+### System Tray
+- Persistent tray icon with session count in title
+- Right-click menu shows all active sessions with status indicators
+- Click a session in the menu to focus its terminal
+- Sessions display custom names when set
+- Show Window / Quit actions
+
+### Visual Design
+- Dark theme with three-zone depth layering (header / content / sidebar)
+- Project accent colors (hash-based, 10 colors) as left border on session entries
+- Separator lines between sessions
+- Neon-colored event type badges and semantic type indicators in the inspector
 
 ## Installation
 
-### Homebrew (recommended)
+### AppImage (Linux)
+
+Download the latest AppImage from [Releases](https://github.com/cadovid/agent-sessions/releases).
 
 ```bash
-brew tap ozankasikci/tap
-brew install --cask agent-sessions
+chmod +x "Agent Sessions_1.0.0_amd64.AppImage"
+./"Agent Sessions_1.0.0_amd64.AppImage"
 ```
 
-### DMG
+### Build from Source
 
-Download the latest DMG from [Releases](https://github.com/ozankasikci/agent-sessions/releases).
+Requirements: Node.js 20+, Rust toolchain, system dependencies for Tauri 2.x on Linux.
+
+```bash
+# Install dependencies
+npm install
+
+# Development
+npm run tauri dev
+
+# Build AppImage
+npm run tauri build -- --bundles appimage
+```
+
+## Terminal Integration
+
+### Zellij (Linux)
+
+The app integrates with Zellij for terminal focusing and session resume:
+
+- **Focus**: Parses `zellij dump-layout` to find the correct pane, switches tabs if needed, then cycles to the target pane
+- **Resume**: Creates a new named Zellij tab and types `claude --resume <session-id>`
+- **Shell hook** (optional): Source `scripts/shell-hook.sh` in your shell config to name Zellij panes by Claude's PID for reliable focusing
+
+### tmux
+
+Basic tmux support with `select-pane` for terminal focusing.
 
 ## Tech Stack
 
-- Tauri 2.x
-- React + TypeScript
-- Tailwind CSS + shadcn/ui
+- **Tauri 2.x** (Rust backend + React frontend)
+- **React + TypeScript** with Vite
+- **Tailwind CSS + shadcn/ui** components
+- **react-markdown + remark-gfm** for message rendering
+- **sysinfo** crate for cross-platform process discovery
+- **SQLite** (rusqlite, bundled) available for future indexing
+
+## License
+
+MIT
