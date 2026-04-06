@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Session } from '../types/session';
+import { Markdown } from './Markdown';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -91,6 +92,33 @@ function setCustomUrl(sessionId: string, url: string) {
     delete urls[sessionId];
   }
   localStorage.setItem(CUSTOM_URLS_KEY, JSON.stringify(urls));
+}
+
+function MessagePreviewBlock({ message }: { message: string | null }) {
+  const [expanded, setExpanded] = useState(false);
+
+  const handleToggle = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setExpanded((prev) => !prev);
+  }, []);
+
+  if (!message) return null;
+
+  return (
+    <div className="flex-1">
+      <div className={`text-sm text-muted-foreground leading-relaxed ${expanded ? '' : 'line-clamp-2'}`}>
+        <Markdown>{message}</Markdown>
+      </div>
+      {message.length > 300 && (
+        <button
+          onClick={handleToggle}
+          className="text-xs text-muted-foreground/60 hover:text-foreground mt-1 transition-colors"
+        >
+          {expanded ? 'show less' : 'show more'}
+        </button>
+      )}
+    </div>
+  );
 }
 
 export function SessionCard({ session, onClick }: SessionCardProps) {
@@ -318,13 +346,7 @@ export function SessionCard({ session, onClick }: SessionCardProps) {
           )}
 
           {/* Message Preview */}
-          <div className="flex-1">
-            {session.lastMessage && (
-              <div className="text-sm text-muted-foreground line-clamp-2 leading-relaxed">
-                {session.lastMessage}
-              </div>
-            )}
-          </div>
+          <MessagePreviewBlock message={session.lastMessage} />
 
           {/* Footer: Status Badge + Time */}
           <div className="flex items-center justify-between pt-3 mt-3 border-t border-border">

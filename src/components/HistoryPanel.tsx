@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { ProjectHistory, HistorySession } from '../types/session';
-import { formatTimeAgo } from '@/lib/formatters';
+import { formatSmartDate, getDateGroupLabel } from '@/lib/formatters';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -10,6 +10,7 @@ import {
   DialogTitle,
   DialogFooter,
 } from '@/components/ui/dialog';
+import { Markdown } from './Markdown';
 
 const HISTORY_PANEL_EXPANDED_KEY = 'agent-sessions-history-panel-expanded';
 const HISTORY_PANEL_WIDTH_KEY = 'agent-sessions-history-panel-width';
@@ -17,19 +18,30 @@ const DEFAULT_PANEL_WIDTH = 288;
 const MIN_PANEL_WIDTH = 200;
 const MAX_PANEL_WIDTH = 600;
 
-// Neon background colors for project groups (dark-mode friendly)
-const GROUP_COLORS = [
-  'rgba(0, 255, 136, 0.15)',    // neon green
-  'rgba(0, 200, 255, 0.15)',    // neon cyan
-  'rgba(200, 0, 255, 0.15)',    // neon magenta
-  'rgba(255, 0, 128, 0.15)',    // neon pink
-  'rgba(255, 255, 0, 0.12)',    // neon yellow
-  'rgba(255, 100, 0, 0.15)',    // neon orange
-  'rgba(0, 128, 255, 0.15)',    // neon blue
-  'rgba(180, 0, 180, 0.15)',    // neon purple
-];
 
 const CUSTOM_NAMES_KEY = 'agent-sessions-custom-names';
+const FAVORITES_KEY = 'agent-sessions-favorites';
+
+function getFavoriteIds(): Set<string> {
+  try {
+    const stored = localStorage.getItem(FAVORITES_KEY);
+    return stored ? new Set(JSON.parse(stored)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveFavoriteIds(ids: Set<string>) {
+  localStorage.setItem(FAVORITES_KEY, JSON.stringify([...ids]));
+}
+
+function StarIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg className="w-3 h-3" fill={filled ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+    </svg>
+  );
+}
 
 function getCustomName(sessionId: string): string | null {
   try {
@@ -40,6 +52,28 @@ function getCustomName(sessionId: string): string | null {
   } catch {
     return null;
   }
+}
+
+// Stable color derived from project name hash
+const ACCENT_COLORS = [
+  '#10b981', // emerald
+  '#3b82f6', // blue
+  '#a855f7', // purple
+  '#f59e0b', // amber
+  '#ef4444', // red
+  '#06b6d4', // cyan
+  '#f97316', // orange
+  '#ec4899', // pink
+  '#84cc16', // lime
+  '#8b5cf6', // violet
+];
+
+function getProjectAccentColor(projectName: string): string {
+  let hash = 0;
+  for (let i = 0; i < projectName.length; i++) {
+    hash = ((hash << 5) - hash + projectName.charCodeAt(i)) | 0;
+  }
+  return ACCENT_COLORS[Math.abs(hash) % ACCENT_COLORS.length];
 }
 
 function shortenPath(path: string): string {
@@ -107,35 +141,92 @@ function BranchIcon() {
   );
 }
 
-interface MessagePreviewProps {
+interface HoverPreviewProps {
   message: string;
+  role: string;
   anchorRect: DOMRect;
+  onMouseEnter: () => void;
+  onMouseLeave: () => void;
 }
 
-function MessagePreview({ message, anchorRect }: MessagePreviewProps) {
-  const panelWidth = 280;
+function HoverPreview({ message, role, anchorRect, onMouseEnter, onMouseLeave }: HoverPreviewProps) {
+  const panelWidth = 320;
   const viewportWidth = window.innerWidth;
   const viewportHeight = window.innerHeight;
 
-  // Position to the right of anchor; flip left if too close to edge
   let left = anchorRect.right + 8;
   if (left + panelWidth > viewportWidth - 8) {
     left = anchorRect.left - panelWidth - 8;
   }
 
-  // Align top to anchor, but clamp to viewport
   let top = anchorRect.top;
-  const maxTop = viewportHeight - 200; // rough min height for panel
+  const maxTop = viewportHeight - 200;
   if (top > maxTop) top = maxTop;
 
   return createPortal(
     <div
-      className="fixed z-50 bg-popover border border-border rounded-lg shadow-xl p-3 text-xs text-foreground/80 leading-relaxed pointer-events-none"
-      style={{ left, top, width: panelWidth, maxHeight: 320, overflowY: 'auto' }}
+      className="fixed z-50 bg-popover border border-border rounded-lg shadow-xl p-3"
+      style={{ left, top, width: panelWidth, maxHeight: 400, overflowY: 'auto' }}
+      onMouseEnter={onMouseEnter}
+      onMouseLeave={onMouseLeave}
     >
-      {message}
+      <span className={`text-[10px] font-medium uppercase tracking-wider ${role === 'user' ? 'text-blue-400' : 'text-emerald-400'}`}>
+        {role}
+      </span>
+      <div className="text-xs text-foreground/80 leading-relaxed mt-1">
+        <Markdown>{message}</Markdown>
+      </div>
     </div>,
     document.body
+  );
+}
+
+interface MessageLineProps {
+  msg: { text: string; role: string };
+  index: number;
+  isHovered: boolean;
+  hoverRect: DOMRect | null;
+  onHoverEnter: (index: number, rect: DOMRect) => void;
+  onHoverLeave: () => void;
+  onHoverCancel: () => void;
+  onResume: () => void;
+}
+
+function MessageLine({ msg, index, isHovered, hoverRect, onHoverEnter, onHoverLeave, onHoverCancel, onResume }: MessageLineProps) {
+  const lineRef = useRef<HTMLDivElement>(null);
+
+  const handleMouseEnter = useCallback(() => {
+    if (lineRef.current) {
+      onHoverEnter(index, lineRef.current.getBoundingClientRect());
+    }
+  }, [index, onHoverEnter]);
+
+  return (
+    <>
+      <div
+        ref={lineRef}
+        className="py-0.5 cursor-pointer hover:bg-muted/30 rounded px-1"
+        onMouseEnter={handleMouseEnter}
+        onMouseLeave={onHoverLeave}
+        onClick={onResume}
+      >
+        <div className="text-xs text-foreground/70 line-clamp-2">
+          <span className={`font-medium ${msg.role === 'user' ? 'text-blue-400/70' : 'text-emerald-400/70'}`}>
+            {msg.role === 'user' ? 'U' : 'A'}:
+          </span>{' '}
+          <Markdown className="inline">{msg.text}</Markdown>
+        </div>
+      </div>
+      {isHovered && hoverRect && (
+        <HoverPreview
+          message={msg.text}
+          role={msg.role}
+          anchorRect={hoverRect}
+          onMouseEnter={onHoverCancel}
+          onMouseLeave={onHoverLeave}
+        />
+      )}
+    </>
   );
 }
 
@@ -143,15 +234,25 @@ interface SessionEntryProps {
   session: HistorySession;
   onResume: (sessionId: string, cwd: string) => void;
   onDelete: (sessionId: string) => void;
+  showProjectName?: string;
+  isFavorited?: boolean;
+  onToggleFavorite?: (sessionId: string) => void;
+  accentColor?: string;
 }
 
-function SessionEntry({ session, onResume, onDelete }: SessionEntryProps) {
+function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorited, onToggleFavorite, accentColor }: SessionEntryProps) {
   const customName = getCustomName(session.sessionId);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [hoverAnchor, setHoverAnchor] = useState<DOMRect | null>(null);
-  const entryRef = useRef<HTMLDivElement>(null);
+  const [visibleCount, setVisibleCount] = useState(1);
+  // Single active hover: index + rect (only one message hovered at a time)
+  const [activeHover, setActiveHover] = useState<{ index: number; rect: DOMRect } | null>(null);
+  const hoverTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const handleClick = useCallback(() => {
+  const messages = session.recentMessages;
+  const shownMessages = messages.slice(0, visibleCount);
+  const remaining = messages.length - visibleCount;
+
+  const handleResume = useCallback(() => {
     onResume(session.sessionId, session.cwd);
   }, [session.sessionId, session.cwd, onResume]);
 
@@ -165,64 +266,130 @@ function SessionEntry({ session, onResume, onDelete }: SessionEntryProps) {
     onDelete(session.sessionId);
   }, [session.sessionId, onDelete]);
 
-  const handleMouseEnter = useCallback(() => {
-    if (session.lastMessage && entryRef.current) {
-      setHoverAnchor(entryRef.current.getBoundingClientRect());
-    }
-  }, [session.lastMessage]);
+  const handleShowMore = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setVisibleCount((prev) => Math.min(prev + 5, messages.length));
+  }, [messages.length]);
 
-  const handleMouseLeave = useCallback(() => {
-    setHoverAnchor(null);
+  const handleCollapse = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setVisibleCount(1);
+  }, []);
+
+  const handleHoverEnter = useCallback((index: number, rect: DOMRect) => {
+    if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
+    setActiveHover({ index, rect });
+  }, []);
+
+  const handleHoverLeave = useCallback(() => {
+    hoverTimeout.current = setTimeout(() => setActiveHover(null), 150);
+  }, []);
+
+  const handleHoverCancel = useCallback(() => {
+    if (hoverTimeout.current) clearTimeout(hoverTimeout.current);
   }, []);
 
   return (
     <>
-      <div className="group relative" ref={entryRef} onMouseEnter={handleMouseEnter} onMouseLeave={handleMouseLeave}>
-        <button
-          onClick={handleClick}
-          className="w-full text-left px-3 py-2 pr-7 rounded hover:bg-muted/50 transition-colors"
-        >
-          {/* Custom name (if set via rename) */}
-          {customName && (
-            <div className="text-xs font-medium text-foreground truncate mb-0.5">
-              {customName}
+      <div
+        className="group relative border-b border-border/10"
+        style={accentColor ? { borderLeft: `2px solid ${accentColor}` } : undefined}
+      >
+        {/* Session header: name, date, branch, delete */}
+        <div className="flex items-start px-3 py-2 pr-7">
+          <button
+            onClick={handleResume}
+            className="flex-1 min-w-0 text-left hover:opacity-80 transition-opacity"
+          >
+            {showProjectName && (
+              <div className="text-[10px] text-foreground/50 truncate mb-0.5">
+                {showProjectName}
+              </div>
+            )}
+            {customName && (
+              <div className="text-xs font-medium text-orange-400 truncate mb-0.5">
+                {customName}
+              </div>
+            )}
+            <div className="flex items-center gap-1.5 min-w-0">
+              <span className="text-xs text-muted-foreground shrink-0">
+                {formatSmartDate(session.lastActivityAt)}
+              </span>
+              {session.gitBranch && (
+                <>
+                  <BranchIcon />
+                  <span className="text-xs text-muted-foreground truncate">
+                    {session.gitBranch}
+                  </span>
+                </>
+              )}
             </div>
-          )}
-          {/* Line 1: date + branch */}
-          <div className="flex items-center gap-1.5 min-w-0">
-            <span className="text-xs text-muted-foreground shrink-0">
-              {formatTimeAgo(session.lastActivityAt)}
-            </span>
-            {session.gitBranch && (
-              <>
-                <BranchIcon />
-                <span className="text-xs text-muted-foreground truncate">
-                  {session.gitBranch}
-                </span>
-              </>
+          </button>
+          {/* Star + Delete buttons */}
+          <div className="flex items-center gap-0.5 shrink-0 mt-0.5">
+            {onToggleFavorite && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onToggleFavorite(session.sessionId); }}
+                className={`p-0.5 rounded transition-all ${isFavorited ? 'text-amber-400' : 'text-muted-foreground/40 hover:text-amber-400 opacity-0 group-hover:opacity-100'}`}
+                title={isFavorited ? 'Unstar session' : 'Star session'}
+              >
+                <StarIcon filled={!!isFavorited} />
+              </button>
             )}
+            <button
+              onClick={handleDeleteClick}
+              className="p-0.5 rounded text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 transition-all"
+              title="Delete session"
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
           </div>
-          {/* Lines 2-3: message preview (2 lines) */}
-          <div className="text-xs text-foreground/70 line-clamp-2 mt-0.5 group-hover:text-foreground transition-colors">
-            {session.lastMessage ? session.lastMessage : (
-              <span className="italic text-muted-foreground">No message</span>
-            )}
-          </div>
-        </button>
-        {/* Delete button — appears on hover */}
-        <button
-          onClick={handleDeleteClick}
-          className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 rounded text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 transition-all"
-          title="Delete session"
-        >
-          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-          </svg>
-        </button>
+        </div>
 
-        {/* Hover preview panel */}
-        {hoverAnchor && session.lastMessage && (
-          <MessagePreview message={session.lastMessage} anchorRect={hoverAnchor} />
+        {/* Messages section — indented under the header */}
+        {messages.length > 0 && (
+          <div className="ml-5 mr-2 mb-1 border-l border-border/30 pl-2">
+            {/* Visible messages */}
+            {shownMessages.map((msg, i) => (
+              <MessageLine
+                key={i}
+                msg={msg}
+                index={i}
+                isHovered={activeHover?.index === i}
+                hoverRect={activeHover?.index === i ? activeHover.rect : null}
+                onHoverEnter={handleHoverEnter}
+                onHoverLeave={handleHoverLeave}
+                onHoverCancel={handleHoverCancel}
+                onResume={handleResume}
+              />
+            ))}
+
+            {/* "+N more" / "collapse" toggle */}
+            {remaining > 0 && (
+              <button
+                onClick={handleShowMore}
+                className="ml-1 my-0.5 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+              >
+                +{Math.min(remaining, 5)} more
+              </button>
+            )}
+            {visibleCount > 1 && (
+              <button
+                onClick={handleCollapse}
+                className="ml-1 my-0.5 text-[10px] text-muted-foreground hover:text-foreground transition-colors"
+              >
+                collapse
+              </button>
+            )}
+          </div>
+        )}
+
+        {messages.length === 0 && (
+          <div className="ml-5 mr-2 mb-1 pl-2 text-xs italic text-muted-foreground">
+            No messages
+          </div>
         )}
       </div>
 
@@ -251,18 +418,39 @@ interface ProjectGroupProps {
   onToggle: (projectPath: string) => void;
   onResumeSession: (sessionId: string, cwd: string) => void;
   onDeleteSession: (sessionId: string, projectDirName: string) => void;
-  colorIndex: number;
+  favoriteIds: Set<string>;
+  onToggleFavorite: (sessionId: string, projectDirName: string) => void;
 }
 
-function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDeleteSession, colorIndex }: ProjectGroupProps) {
-  const bgColor = GROUP_COLORS[colorIndex % GROUP_COLORS.length];
+function groupSessionsByDate(sessions: HistorySession[]): { label: string; sessions: HistorySession[] }[] {
+  const groups: { label: string; sessions: HistorySession[] }[] = [];
+  let currentLabel = '';
+  for (const session of sessions) {
+    const label = getDateGroupLabel(session.lastActivityAt);
+    if (label !== currentLabel) {
+      groups.push({ label, sessions: [session] });
+      currentLabel = label;
+    } else {
+      groups[groups.length - 1].sessions.push(session);
+    }
+  }
+  return groups;
+}
 
+function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDeleteSession, favoriteIds, onToggleFavorite }: ProjectGroupProps) {
   const handleDelete = useCallback((sessionId: string) => {
     onDeleteSession(sessionId, project.projectDirName);
   }, [onDeleteSession, project.projectDirName]);
 
+  const handleFavorite = useCallback((sessionId: string) => {
+    onToggleFavorite(sessionId, project.projectDirName);
+  }, [onToggleFavorite, project.projectDirName]);
+
+  const dateGroups = useMemo(() => groupSessionsByDate(project.sessions), [project.sessions]);
+  const accentColor = useMemo(() => getProjectAccentColor(project.projectName), [project.projectName]);
+
   return (
-    <div className="mb-1 rounded-md overflow-hidden" style={{ backgroundColor: bgColor }}>
+    <div className="mb-1 rounded-md overflow-hidden">
       <button
         onClick={() => onToggle(project.projectPath)}
         className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded hover:bg-muted/30 transition-colors group"
@@ -282,13 +470,23 @@ function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDelet
       </button>
       {!isCollapsed && (
         <div className="ml-4 mr-1 mb-1 space-y-0.5 border-l border-border/40 pl-2">
-          {project.sessions.map((session) => (
-            <SessionEntry
-              key={session.sessionId}
-              session={session}
-              onResume={onResumeSession}
-              onDelete={handleDelete}
-            />
+          {dateGroups.map((group) => (
+            <div key={group.label}>
+              <div className="text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider px-3 py-1">
+                {group.label}
+              </div>
+              {group.sessions.map((session) => (
+                <SessionEntry
+                  key={session.sessionId}
+                  session={session}
+                  onResume={onResumeSession}
+                  onDelete={handleDelete}
+                  isFavorited={favoriteIds.has(session.sessionId)}
+                  onToggleFavorite={handleFavorite}
+                  accentColor={accentColor}
+                />
+              ))}
+            </div>
           ))}
         </div>
       )}
@@ -325,6 +523,9 @@ export function HistoryPanel({
   });
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [groupingMode, setGroupingMode] = useState<'project' | 'date'>('project');
+  const [favoriteIds, setFavoriteIds] = useState<Set<string>>(getFavoriteIds);
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [isResizing, setIsResizing] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -400,12 +601,38 @@ export function HistoryPanel({
     });
   }, []);
 
+  const handleToggleFavorite = useCallback(async (sessionId: string, projectDirName: string) => {
+    setFavoriteIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) {
+        next.delete(sessionId);
+      } else {
+        next.add(sessionId);
+        // Archive on star
+        import('@tauri-apps/api/core').then(({ invoke }) => {
+          invoke('archive_session', { sessionId, projectDirName }).catch(console.error);
+        });
+      }
+      saveFavoriteIds(next);
+      return next;
+    });
+  }, []);
+
   const filteredProjects = useMemo(() => {
     if (!history) return [];
-    if (!searchQuery.trim()) return history.projects;
+
+    // Apply favorites filter first
+    let projects = history.projects;
+    if (showFavoritesOnly) {
+      projects = projects
+        .map((p) => ({ ...p, sessions: p.sessions.filter((s) => favoriteIds.has(s.sessionId)) }))
+        .filter((p) => p.sessions.length > 0);
+    }
+
+    if (!searchQuery.trim()) return projects;
 
     const q = searchQuery.toLowerCase();
-    return history.projects
+    return projects
       .map((project) => {
         const matchesProject =
           project.projectName.toLowerCase().includes(q) ||
@@ -415,14 +642,59 @@ export function HistoryPanel({
           (session) =>
             matchesProject ||
             (session.gitBranch?.toLowerCase().includes(q) ?? false) ||
-            (session.lastMessage?.toLowerCase().includes(q) ?? false) ||
+            session.recentMessages.some((m) => m.text.toLowerCase().includes(q)) ||
             (getCustomName(session.sessionId)?.toLowerCase().includes(q) ?? false)
         );
 
         return { ...project, sessions: matchedSessions };
       })
       .filter((project) => project.sessions.length > 0);
-  }, [history, searchQuery]);
+  }, [history, searchQuery, showFavoritesOnly, favoriteIds]);
+
+  // "By Date" mode: flatten all sessions, group by date
+  const dateGroupedView = useMemo(() => {
+    if (groupingMode !== 'date' || !history) return [];
+
+    type FlatSession = HistorySession & { projectName: string; projectDirName: string };
+
+    // Apply favorites filter
+    let projects = history.projects;
+    if (showFavoritesOnly) {
+      projects = projects
+        .map((p) => ({ ...p, sessions: p.sessions.filter((s) => favoriteIds.has(s.sessionId)) }))
+        .filter((p) => p.sessions.length > 0);
+    }
+
+    const allSessions: FlatSession[] = projects.flatMap((p) =>
+      p.sessions.map((s) => ({ ...s, projectName: p.projectName, projectDirName: p.projectDirName }))
+    );
+
+    const q = searchQuery.toLowerCase();
+    const filtered = q
+      ? allSessions.filter(
+          (s) =>
+            s.projectName.toLowerCase().includes(q) ||
+            (s.gitBranch?.toLowerCase().includes(q) ?? false) ||
+            s.recentMessages.some((m) => m.text.toLowerCase().includes(q)) ||
+            (getCustomName(s.sessionId)?.toLowerCase().includes(q) ?? false)
+        )
+      : allSessions;
+
+    filtered.sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
+
+    const groups: { label: string; sessions: FlatSession[] }[] = [];
+    let currentLabel = '';
+    for (const s of filtered) {
+      const label = getDateGroupLabel(s.lastActivityAt);
+      if (label !== currentLabel) {
+        groups.push({ label, sessions: [s] });
+        currentLabel = label;
+      } else {
+        groups[groups.length - 1].sessions.push(s);
+      }
+    }
+    return groups;
+  }, [history, groupingMode, searchQuery, showFavoritesOnly, favoriteIds]);
 
   // Collapsed rail
   if (!isExpanded) {
@@ -452,10 +724,33 @@ export function HistoryPanel({
       style={{ width: `${panelWidth}px`, minWidth: `${MIN_PANEL_WIDTH}px`, maxWidth: `${MAX_PANEL_WIDTH}px` }}
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-3 border-b border-border shrink-0">
-        <span className="text-xs font-semibold text-foreground tracking-widest uppercase">
-          History
-        </span>
+      <div className="flex items-center justify-between px-3 py-2.5 border-b border-border shrink-0">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-foreground tracking-widest uppercase">
+            History
+          </span>
+          <div className="flex text-[10px] bg-muted/50 rounded overflow-hidden">
+            <button
+              onClick={() => setGroupingMode('project')}
+              className={`px-2 py-0.5 transition-colors ${groupingMode === 'project' ? 'bg-foreground/15 text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            >
+              Project
+            </button>
+            <button
+              onClick={() => setGroupingMode('date')}
+              className={`px-2 py-0.5 transition-colors ${groupingMode === 'date' ? 'bg-foreground/15 text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            >
+              Date
+            </button>
+          </div>
+          <button
+            onClick={() => setShowFavoritesOnly((p) => !p)}
+            className={`p-0.5 rounded transition-colors ${showFavoritesOnly ? 'text-amber-400' : 'text-muted-foreground hover:text-amber-400'}`}
+            title={showFavoritesOnly ? 'Show all' : 'Show favorites only'}
+          >
+            <StarIcon filled={showFavoritesOnly} />
+          </button>
+        </div>
         <button
           onClick={handleToggleExpand}
           className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
@@ -497,7 +792,7 @@ export function HistoryPanel({
           </div>
         )}
 
-        {!isLoading && !error && filteredProjects.length === 0 && (
+        {!isLoading && !error && groupingMode === 'project' && filteredProjects.length === 0 && (
           <div className="flex items-center justify-center py-8">
             <span className="text-xs text-muted-foreground">
               {searchQuery.trim() ? 'No results found' : 'No session history'}
@@ -505,7 +800,16 @@ export function HistoryPanel({
           </div>
         )}
 
-        {!isLoading && !error && filteredProjects.map((project, index) => (
+        {!isLoading && !error && groupingMode === 'date' && dateGroupedView.length === 0 && (
+          <div className="flex items-center justify-center py-8">
+            <span className="text-xs text-muted-foreground">
+              {searchQuery.trim() ? 'No results found' : 'No session history'}
+            </span>
+          </div>
+        )}
+
+        {/* By Project mode */}
+        {!isLoading && !error && groupingMode === 'project' && filteredProjects.map((project) => (
           <ProjectGroup
             key={project.projectPath}
             project={project}
@@ -513,8 +817,45 @@ export function HistoryPanel({
             onToggle={handleToggleGroup}
             onResumeSession={onResumeSession}
             onDeleteSession={onDeleteSession}
-            colorIndex={index}
+            favoriteIds={favoriteIds}
+            onToggleFavorite={handleToggleFavorite}
           />
+        ))}
+
+        {/* By Date mode */}
+        {!isLoading && !error && groupingMode === 'date' && dateGroupedView.map((group) => (
+          <div key={group.label} className="mb-1 rounded-md overflow-hidden">
+            <button
+              onClick={() => handleToggleGroup(group.label)}
+              className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded hover:bg-muted/30 transition-colors"
+            >
+              <ChevronDownIcon collapsed={collapsedGroups.has(group.label)} />
+              <div className="flex-1 min-w-0 text-left">
+                <div className="text-xs font-medium text-foreground">
+                  {group.label}
+                </div>
+              </div>
+              <span className="text-xs text-muted-foreground shrink-0 ml-1">
+                {group.sessions.length}
+              </span>
+            </button>
+            {!collapsedGroups.has(group.label) && (
+              <div className="ml-4 mr-1 mb-1 space-y-0.5 border-l border-border/40 pl-2">
+                {group.sessions.map((session) => (
+                  <SessionEntry
+                    key={session.sessionId}
+                    session={session}
+                    onResume={onResumeSession}
+                    onDelete={(id) => onDeleteSession(id, (session as any).projectDirName)}
+                    showProjectName={(session as any).projectName}
+                    isFavorited={favoriteIds.has(session.sessionId)}
+                    onToggleFavorite={(id) => handleToggleFavorite(id, (session as any).projectDirName)}
+                    accentColor={getProjectAccentColor((session as any).projectName)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
         ))}
       </div>
 

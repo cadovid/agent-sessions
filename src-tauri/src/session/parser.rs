@@ -614,10 +614,10 @@ pub fn parse_session_file(
         .unwrap_or("Unknown")
         .to_string();
 
-    // Truncate message for preview (respecting UTF-8 char boundaries)
+    // Cap at 10000 chars to avoid sending huge messages to the frontend
     let last_message = last_message.map(|m| {
-        if m.chars().count() > 100 {
-            format!("{}...", m.chars().take(100).collect::<String>())
+        if m.chars().count() > 10000 {
+            format!("{}...", m.chars().take(10000).collect::<String>())
         } else {
             m
         }

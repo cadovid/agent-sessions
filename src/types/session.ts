@@ -24,13 +24,17 @@ export interface SessionsResponse {
   waitingCount: number;
 }
 
+export interface MessagePreview {
+  text: string;
+  role: string;
+}
+
 export interface HistorySession {
   sessionId: string;
   cwd: string;
   lastActivityAt: string;
   gitBranch: string | null;
-  lastMessage: string | null;
-  lastMessageRole: 'user' | 'assistant' | null;
+  recentMessages: MessagePreview[];
 }
 
 export interface ProjectHistory {

@@ -1,23 +1,41 @@
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 import { SessionGrid } from './components/SessionGrid';
 import { Settings, useHotkeyInit } from './components/Settings';
 import { useSessions } from './hooks/useSessions';
 import { HistoryPanel } from './components/HistoryPanel';
 import { useSessionHistory } from './hooks/useSessionHistory';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
+import { Session } from './types/session';
+
+type FilterTab = 'all' | 'active' | 'idle';
+
+function isActive(s: Session) {
+  return s.status === 'processing' || s.status === 'thinking' || s.status === 'compacting';
+}
+function isIdle(s: Session) {
+  return s.status === 'waiting' || s.status === 'idle';
+}
 
 function App() {
   const [showSettings, setShowSettings] = useState(false);
+  const [filterTab, setFilterTab] = useState<FilterTab>('all');
   const {
     sessions,
     totalCount,
-    waitingCount,
     isLoading,
     error,
     refresh,
     focusSession,
   } = useSessions();
+
+  const activeCount = useMemo(() => sessions.filter(isActive).length, [sessions]);
+  const idleCount = useMemo(() => sessions.filter(isIdle).length, [sessions]);
+
+  const filteredSessions = useMemo(() => {
+    if (filterTab === 'active') return sessions.filter(isActive);
+    if (filterTab === 'idle') return sessions.filter(isIdle);
+    return sessions;
+  }, [sessions, filterTab]);
 
   const {
     history,
@@ -42,15 +60,37 @@ function App() {
         <div data-tauri-drag-region className="flex items-center gap-4 pl-16">
           <h1 data-tauri-drag-region className="text-lg font-semibold text-foreground">Agent Sessions</h1>
           {totalCount > 0 && (
-            <div data-tauri-drag-region className="flex items-center gap-2">
-              <Badge data-tauri-drag-region variant="secondary" className="font-medium pointer-events-none">
-                {totalCount} active
-              </Badge>
-              {waitingCount > 0 && (
-                <Badge data-tauri-drag-region className="bg-status-waiting/20 text-status-waiting border-status-waiting/30 font-medium pointer-events-none">
-                  {waitingCount} waiting
-                </Badge>
-              )}
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setFilterTab('all')}
+                className={`px-2.5 py-0.5 rounded-full text-xs font-medium transition-colors ${
+                  filterTab === 'all'
+                    ? 'bg-foreground/15 text-foreground'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                }`}
+              >
+                All {totalCount}
+              </button>
+              <button
+                onClick={() => setFilterTab('active')}
+                className={`px-2.5 py-0.5 rounded-full text-xs font-medium transition-colors ${
+                  filterTab === 'active'
+                    ? 'bg-emerald-500/20 text-emerald-400'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                }`}
+              >
+                Active {activeCount}
+              </button>
+              <button
+                onClick={() => setFilterTab('idle')}
+                className={`px-2.5 py-0.5 rounded-full text-xs font-medium transition-colors ${
+                  filterTab === 'idle'
+                    ? 'bg-status-waiting/20 text-status-waiting'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+                }`}
+              >
+                Idle {idleCount}
+              </button>
             </div>
           )}
         </div>
@@ -113,21 +153,25 @@ function App() {
                 {error}
               </div>
             </div>
-          ) : sessions.length === 0 ? (
+          ) : filteredSessions.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center">
               <div className="w-20 h-20 mb-6 rounded-2xl bg-muted/50 flex items-center justify-center border border-border">
                 <svg className="w-10 h-10 text-muted-foreground" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                 </svg>
               </div>
-              <h2 className="text-lg font-medium text-foreground mb-2">No active sessions</h2>
+              <h2 className="text-lg font-medium text-foreground mb-2">
+                {sessions.length === 0 ? 'No active sessions' : `No ${filterTab} sessions`}
+              </h2>
               <p className="text-muted-foreground text-sm max-w-xs">
-                Start a Claude session in your terminal to see it here
+                {sessions.length === 0
+                  ? 'Start a Claude session in your terminal to see it here'
+                  : 'Try a different filter tab'}
               </p>
             </div>
           ) : (
             <SessionGrid
-              sessions={sessions}
+              sessions={filteredSessions}
               onSessionClick={focusSession}
             />
           )}
