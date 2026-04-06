@@ -183,24 +183,14 @@ fn parse_history_session(jsonl_path: &PathBuf) -> Option<HistorySession> {
     })
 }
 
-/// Scan `~/.claude/projects/` and return all past sessions grouped by project,
-/// sorted by most recent activity descending.
-pub fn get_session_history() -> SessionHistoryResponse {
-    let claude_dir = match dirs::home_dir() {
-        Some(h) => h.join(".claude").join("projects"),
-        None => return SessionHistoryResponse { projects: Vec::new() },
-    };
-
-    if !claude_dir.exists() {
-        return SessionHistoryResponse { projects: Vec::new() };
-    }
-
-    let entries = match fs::read_dir(&claude_dir) {
-        Ok(e) => e,
-        Err(_) => return SessionHistoryResponse { projects: Vec::new() },
-    };
-
+/// Scan a base directory for project subdirectories containing JSONL session files.
+fn scan_project_directories(base_dir: &PathBuf) -> Vec<ProjectHistory> {
     let mut projects: Vec<ProjectHistory> = Vec::new();
+
+    let entries = match fs::read_dir(base_dir) {
+        Ok(e) => e,
+        Err(_) => return projects,
+    };
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -213,7 +203,6 @@ pub fn get_session_history() -> SessionHistoryResponse {
             None => continue,
         };
 
-        // Collect all JSONL files, excluding agent-*.jsonl
         let jsonl_files: Vec<PathBuf> = match fs::read_dir(&path) {
             Ok(dir_entries) => dir_entries
                 .flatten()
@@ -245,11 +234,8 @@ pub fn get_session_history() -> SessionHistoryResponse {
             continue;
         }
 
-        // Sort sessions by last_activity_at descending
         sessions.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
 
-        // Determine project_path: use the cwd from the most-recent session if available,
-        // otherwise fall back to decoding the directory name.
         let project_path = sessions
             .first()
             .map(|s| s.cwd.clone())
@@ -271,7 +257,46 @@ pub fn get_session_history() -> SessionHistoryResponse {
         });
     }
 
-    // Sort projects by the most-recent session's last_activity_at descending
+    projects
+}
+
+/// Scan `~/.claude/projects/` (and archives) and return all past sessions grouped by project.
+pub fn get_session_history() -> SessionHistoryResponse {
+    let mut projects = match dirs::home_dir() {
+        Some(h) => {
+            let claude_dir = h.join(".claude").join("projects");
+            if claude_dir.exists() {
+                scan_project_directories(&claude_dir)
+            } else {
+                Vec::new()
+            }
+        }
+        None => Vec::new(),
+    };
+
+    // Merge archived sessions (dedup by session_id, prefer live over archived)
+    if let Some(archive_dir) = get_archive_base_dir() {
+        if archive_dir.exists() {
+            let archived = scan_project_directories(&archive_dir);
+            for arch_project in archived {
+                if let Some(existing) = projects.iter_mut().find(|p| p.project_dir_name == arch_project.project_dir_name) {
+                    let existing_ids: std::collections::HashSet<String> =
+                        existing.sessions.iter().map(|s| s.session_id.clone()).collect();
+                    let new_sessions: Vec<HistorySession> = arch_project
+                        .sessions
+                        .into_iter()
+                        .filter(|s| !existing_ids.contains(&s.session_id))
+                        .collect();
+                    existing.sessions.extend(new_sessions);
+                    existing.sessions.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
+                } else {
+                    projects.push(arch_project);
+                }
+            }
+        }
+    }
+
+    // Sort projects by most-recent session descending
     projects.sort_by(|a, b| {
         let a_time = a.sessions.first().map(|s| s.last_activity_at.as_str()).unwrap_or("");
         let b_time = b.sessions.first().map(|s| s.last_activity_at.as_str()).unwrap_or("");
@@ -303,6 +328,63 @@ pub fn delete_history_session(session_id: &str, project_dir_name: &str) -> Resul
     }
 
     Ok(())
+}
+
+/// Archive a session by copying its JSONL file (and subdirectory) to a safe location.
+pub fn archive_session(session_id: &str, project_dir_name: &str) -> Result<(), String> {
+    let source_dir = dirs::home_dir()
+        .ok_or("Cannot determine home directory")?
+        .join(".claude")
+        .join("projects")
+        .join(project_dir_name);
+
+    let archive_dir = dirs::data_dir()
+        .ok_or("Cannot determine data directory")?
+        .join("agent-sessions")
+        .join("archives")
+        .join(project_dir_name);
+
+    fs::create_dir_all(&archive_dir)
+        .map_err(|e| format!("Failed to create archive directory: {}", e))?;
+
+    // Copy JSONL file
+    let source_jsonl = source_dir.join(format!("{}.jsonl", session_id));
+    if source_jsonl.exists() {
+        let dest_jsonl = archive_dir.join(format!("{}.jsonl", session_id));
+        fs::copy(&source_jsonl, &dest_jsonl)
+            .map_err(|e| format!("Failed to archive session file: {}", e))?;
+    }
+
+    // Copy subdirectory if present
+    let source_subdir = source_dir.join(session_id);
+    if source_subdir.is_dir() {
+        let dest_subdir = archive_dir.join(session_id);
+        copy_dir_recursive(&source_subdir, &dest_subdir)
+            .map_err(|e| format!("Failed to archive session directory: {}", e))?;
+    }
+
+    Ok(())
+}
+
+/// Recursively copy a directory.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Get the archive base directory path.
+fn get_archive_base_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("agent-sessions").join("archives"))
 }
 
 #[cfg(test)]

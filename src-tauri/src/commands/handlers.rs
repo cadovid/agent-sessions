@@ -126,6 +126,95 @@ pub fn delete_history_session(session_id: String, project_dir_name: String) -> R
     history::delete_history_session(&session_id, &project_dir_name)
 }
 
+/// Info about a session for the tray menu
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraySessionInfo {
+    pub pid: u32,
+    pub project_name: String,
+    pub status: String,
+}
+
+/// Rebuild the tray menu with the current session list
+#[tauri::command]
+pub fn update_tray_menu(app: tauri::AppHandle, sessions: Vec<TraySessionInfo>) -> Result<(), String> {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder};
+
+    let active_count = sessions.iter().filter(|s| s.status == "active").count();
+    let idle_count = sessions.iter().filter(|s| s.status == "idle").count();
+
+    let mut builder = MenuBuilder::new(&app);
+
+    // Header with counts
+    if !sessions.is_empty() {
+        let label = format!("{} Active / {} Idle", active_count, idle_count);
+        let header = MenuItemBuilder::with_id("header", &label)
+            .enabled(false)
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+        builder = builder.item(&header).separator();
+    }
+
+    // Session items
+    for session in &sessions {
+        let dot = if session.status == "active" { "●" } else { "○" };
+        let label = format!("{} {}", dot, session.project_name);
+        let item = MenuItemBuilder::with_id(format!("session-{}", session.pid), &label)
+            .build(&app)
+            .map_err(|e| e.to_string())?;
+        builder = builder.item(&item);
+    }
+
+    if !sessions.is_empty() {
+        builder = builder.separator();
+    }
+
+    // Show Window + Quit
+    let show_item = MenuItemBuilder::with_id("show", "Show Window")
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+    let quit_item = MenuItemBuilder::with_id("quit", "Quit")
+        .build(&app)
+        .map_err(|e| e.to_string())?;
+    builder = builder.item(&show_item).separator().item(&quit_item);
+
+    let menu = builder.build().map_err(|e| e.to_string())?;
+
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        tray.set_menu(Some(menu)).map_err(|e| e.to_string())?;
+    }
+
+    Ok(())
+}
+
+/// Archive a session by copying it to a safe location
+#[tauri::command]
+pub fn archive_session(session_id: String, project_dir_name: String) -> Result<(), String> {
+    history::archive_session(&session_id, &project_dir_name)
+}
+
+/// Open a file in the user's default editor or xdg-open
+#[tauri::command]
+pub fn open_in_editor(path: String) -> Result<(), String> {
+    use std::process::Command;
+
+    // Validate: must be absolute path, no traversal
+    if !path.starts_with('/') || path.contains("..") {
+        return Err("Invalid path".to_string());
+    }
+
+    let editor = std::env::var("EDITOR")
+        .or_else(|_| std::env::var("VISUAL"))
+        .unwrap_or_else(|_| "xdg-open".to_string());
+
+    Command::new(&editor)
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("Failed to open {}: {}", path, e))?;
+
+    Ok(())
+}
+
 /// Resume a past Claude session in a new Zellij tab (Linux only)
 #[tauri::command]
 pub fn resume_session(session_id: String, project_path: String) -> Result<(), String> {

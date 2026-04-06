@@ -1,12 +1,33 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { openUrl } from '@tauri-apps/plugin-opener';
+import { invoke } from '@tauri-apps/api/core';
 
 interface MarkdownProps {
   children: string;
   className?: string;
 }
 
+// Preprocess: wrap bare absolute file paths in markdown links (outside code blocks)
+function linkifyFilePaths(text: string): string {
+  // Don't modify content inside code fences
+  const parts = text.split(/(```[\s\S]*?```|`[^`]+`)/g);
+  return parts
+    .map((part, i) => {
+      // Odd indices are code blocks/spans — leave untouched
+      if (i % 2 === 1) return part;
+      // Match absolute paths (not already inside markdown links)
+      return part.replace(
+        /(?<!\[)(?<!\()(\/(home|etc|usr|var|tmp|opt|mnt|srv|root|nix)\/[^\s),\]'"]+)/g,
+        '[$1](file://$1)'
+      );
+    })
+    .join('');
+}
+
 export function Markdown({ children, className }: MarkdownProps) {
+  const processed = linkifyFilePaths(children);
+
   return (
     <div className={`markdown-content ${className ?? ''}`}>
       <ReactMarkdown
@@ -40,9 +61,29 @@ export function Markdown({ children, className }: MarkdownProps) {
               {children}
             </blockquote>
           ),
-          a: ({ children }) => (
-            <span className="text-blue-400 underline">{children}</span>
-          ),
+          a: ({ href, children }) => {
+            const handleClick = async (e: React.MouseEvent) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (!href) return;
+              if (href.startsWith('file://')) {
+                const path = href.replace('file://', '');
+                await invoke('open_in_editor', { path }).catch(console.error);
+              } else {
+                await openUrl(href).catch(console.error);
+              }
+            };
+            const isFile = href?.startsWith('file://');
+            return (
+              <span
+                className={`underline cursor-pointer hover:opacity-80 ${isFile ? 'text-emerald-400' : 'text-blue-400'}`}
+                onClick={handleClick}
+                title={href}
+              >
+                {children}
+              </span>
+            );
+          },
           table: ({ children }) => (
             <table className="border-collapse text-[0.85em] my-1">{children}</table>
           ),
@@ -54,7 +95,7 @@ export function Markdown({ children, className }: MarkdownProps) {
           ),
         }}
       >
-        {children}
+        {processed}
       </ReactMarkdown>
     </div>
   );

@@ -14,6 +14,39 @@ export function formatTimeAgo(timestamp: string): string {
   return `${diffDays}d ago`;
 }
 
+export function formatSmartDate(timestamp: string): string {
+  const date = new Date(timestamp);
+  const now = new Date();
+  const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+
+  if (date.toDateString() === now.toDateString()) return `Today ${time}`;
+
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return `Yesterday ${time}`;
+
+  const monthDay = date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  if (date.getFullYear() === now.getFullYear()) return `${monthDay} ${time}`;
+
+  return `${monthDay}, ${date.getFullYear()} ${time}`;
+}
+
+export function getDateGroupLabel(timestamp: string): string {
+  const date = new Date(timestamp);
+  const now = new Date();
+
+  if (date.toDateString() === now.toDateString()) return 'Today';
+
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return 'Yesterday';
+
+  if (date.getFullYear() === now.getFullYear()) {
+    return date.toLocaleDateString([], { month: 'long', day: 'numeric' });
+  }
+  return date.toLocaleDateString([], { month: 'long', day: 'numeric', year: 'numeric' });
+}
+
 export function truncatePath(path: string): string {
   return path.replace(/^\/Users\/[^/]+/, '~');
 }

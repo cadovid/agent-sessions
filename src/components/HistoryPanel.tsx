@@ -1,7 +1,7 @@
 import { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { ProjectHistory, HistorySession } from '../types/session';
-import { formatTimeAgo } from '@/lib/formatters';
+import { formatSmartDate, getDateGroupLabel } from '@/lib/formatters';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -18,19 +18,30 @@ const DEFAULT_PANEL_WIDTH = 288;
 const MIN_PANEL_WIDTH = 200;
 const MAX_PANEL_WIDTH = 600;
 
-// Neon background colors for project groups (dark-mode friendly)
-const GROUP_COLORS = [
-  'rgba(0, 255, 136, 0.15)',    // neon green
-  'rgba(0, 200, 255, 0.15)',    // neon cyan
-  'rgba(200, 0, 255, 0.15)',    // neon magenta
-  'rgba(255, 0, 128, 0.15)',    // neon pink
-  'rgba(255, 255, 0, 0.12)',    // neon yellow
-  'rgba(255, 100, 0, 0.15)',    // neon orange
-  'rgba(0, 128, 255, 0.15)',    // neon blue
-  'rgba(180, 0, 180, 0.15)',    // neon purple
-];
 
 const CUSTOM_NAMES_KEY = 'agent-sessions-custom-names';
+const FAVORITES_KEY = 'agent-sessions-favorites';
+
+function getFavoriteIds(): Set<string> {
+  try {
+    const stored = localStorage.getItem(FAVORITES_KEY);
+    return stored ? new Set(JSON.parse(stored)) : new Set();
+  } catch {
+    return new Set();
+  }
+}
+
+function saveFavoriteIds(ids: Set<string>) {
+  localStorage.setItem(FAVORITES_KEY, JSON.stringify([...ids]));
+}
+
+function StarIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg className="w-3 h-3" fill={filled ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z" />
+    </svg>
+  );
+}
 
 function getCustomName(sessionId: string): string | null {
   try {
@@ -41,6 +52,28 @@ function getCustomName(sessionId: string): string | null {
   } catch {
     return null;
   }
+}
+
+// Stable color derived from project name hash
+const ACCENT_COLORS = [
+  '#10b981', // emerald
+  '#3b82f6', // blue
+  '#a855f7', // purple
+  '#f59e0b', // amber
+  '#ef4444', // red
+  '#06b6d4', // cyan
+  '#f97316', // orange
+  '#ec4899', // pink
+  '#84cc16', // lime
+  '#8b5cf6', // violet
+];
+
+function getProjectAccentColor(projectName: string): string {
+  let hash = 0;
+  for (let i = 0; i < projectName.length; i++) {
+    hash = ((hash << 5) - hash + projectName.charCodeAt(i)) | 0;
+  }
+  return ACCENT_COLORS[Math.abs(hash) % ACCENT_COLORS.length];
 }
 
 function shortenPath(path: string): string {
@@ -201,9 +234,13 @@ interface SessionEntryProps {
   session: HistorySession;
   onResume: (sessionId: string, cwd: string) => void;
   onDelete: (sessionId: string) => void;
+  showProjectName?: string;
+  isFavorited?: boolean;
+  onToggleFavorite?: (sessionId: string) => void;
+  accentColor?: string;
 }
 
-function SessionEntry({ session, onResume, onDelete }: SessionEntryProps) {
+function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorited, onToggleFavorite, accentColor }: SessionEntryProps) {
   const customName = getCustomName(session.sessionId);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(1);
@@ -254,13 +291,21 @@ function SessionEntry({ session, onResume, onDelete }: SessionEntryProps) {
 
   return (
     <>
-      <div className="group relative">
+      <div
+        className="group relative border-b border-border/10"
+        style={accentColor ? { borderLeft: `2px solid ${accentColor}` } : undefined}
+      >
         {/* Session header: name, date, branch, delete */}
         <div className="flex items-start px-3 py-2 pr-7">
           <button
             onClick={handleResume}
             className="flex-1 min-w-0 text-left hover:opacity-80 transition-opacity"
           >
+            {showProjectName && (
+              <div className="text-[10px] text-foreground/50 truncate mb-0.5">
+                {showProjectName}
+              </div>
+            )}
             {customName && (
               <div className="text-xs font-medium text-orange-400 truncate mb-0.5">
                 {customName}
@@ -268,7 +313,7 @@ function SessionEntry({ session, onResume, onDelete }: SessionEntryProps) {
             )}
             <div className="flex items-center gap-1.5 min-w-0">
               <span className="text-xs text-muted-foreground shrink-0">
-                {formatTimeAgo(session.lastActivityAt)}
+                {formatSmartDate(session.lastActivityAt)}
               </span>
               {session.gitBranch && (
                 <>
@@ -280,16 +325,27 @@ function SessionEntry({ session, onResume, onDelete }: SessionEntryProps) {
               )}
             </div>
           </button>
-          {/* Delete button */}
-          <button
-            onClick={handleDeleteClick}
-            className="shrink-0 p-0.5 rounded text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 transition-all mt-0.5"
-            title="Delete session"
-          >
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          {/* Star + Delete buttons */}
+          <div className="flex items-center gap-0.5 shrink-0 mt-0.5">
+            {onToggleFavorite && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onToggleFavorite(session.sessionId); }}
+                className={`p-0.5 rounded transition-all ${isFavorited ? 'text-amber-400' : 'text-muted-foreground/40 hover:text-amber-400 opacity-0 group-hover:opacity-100'}`}
+                title={isFavorited ? 'Unstar session' : 'Star session'}
+              >
+                <StarIcon filled={!!isFavorited} />
+              </button>
+            )}
+            <button
+              onClick={handleDeleteClick}
+              className="p-0.5 rounded text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 transition-all"
+              title="Delete session"
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         {/* Messages section — indented under the header */}
@@ -362,18 +418,39 @@ interface ProjectGroupProps {
   onToggle: (projectPath: string) => void;
   onResumeSession: (sessionId: string, cwd: string) => void;
   onDeleteSession: (sessionId: string, projectDirName: string) => void;
-  colorIndex: number;
+  favoriteIds: Set<string>;
+  onToggleFavorite: (sessionId: string, projectDirName: string) => void;
 }
 
-function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDeleteSession, colorIndex }: ProjectGroupProps) {
-  const bgColor = GROUP_COLORS[colorIndex % GROUP_COLORS.length];
+function groupSessionsByDate(sessions: HistorySession[]): { label: string; sessions: HistorySession[] }[] {
+  const groups: { label: string; sessions: HistorySession[] }[] = [];
+  let currentLabel = '';
+  for (const session of sessions) {
+    const label = getDateGroupLabel(session.lastActivityAt);
+    if (label !== currentLabel) {
+      groups.push({ label, sessions: [session] });
+      currentLabel = label;
+    } else {
+      groups[groups.length - 1].sessions.push(session);
+    }
+  }
+  return groups;
+}
 
+function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDeleteSession, favoriteIds, onToggleFavorite }: ProjectGroupProps) {
   const handleDelete = useCallback((sessionId: string) => {
     onDeleteSession(sessionId, project.projectDirName);
   }, [onDeleteSession, project.projectDirName]);
 
+  const handleFavorite = useCallback((sessionId: string) => {
+    onToggleFavorite(sessionId, project.projectDirName);
+  }, [onToggleFavorite, project.projectDirName]);
+
+  const dateGroups = useMemo(() => groupSessionsByDate(project.sessions), [project.sessions]);
+  const accentColor = useMemo(() => getProjectAccentColor(project.projectName), [project.projectName]);
+
   return (
-    <div className="mb-1 rounded-md overflow-hidden" style={{ backgroundColor: bgColor }}>
+    <div className="mb-1 rounded-md overflow-hidden">
       <button
         onClick={() => onToggle(project.projectPath)}
         className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded hover:bg-muted/30 transition-colors group"
@@ -393,13 +470,23 @@ function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDelet
       </button>
       {!isCollapsed && (
         <div className="ml-4 mr-1 mb-1 space-y-0.5 border-l border-border/40 pl-2">
-          {project.sessions.map((session) => (
-            <SessionEntry
-              key={session.sessionId}
-              session={session}
-              onResume={onResumeSession}
-              onDelete={handleDelete}
-            />
+          {dateGroups.map((group) => (
+            <div key={group.label}>
+              <div className="text-[10px] font-medium text-muted-foreground/60 uppercase tracking-wider px-3 py-1">
+                {group.label}
+              </div>
+              {group.sessions.map((session) => (
+                <SessionEntry
+                  key={session.sessionId}
+                  session={session}
+                  onResume={onResumeSession}
+                  onDelete={handleDelete}
+                  isFavorited={favoriteIds.has(session.sessionId)}
+                  onToggleFavorite={handleFavorite}
+                  accentColor={accentColor}
+                />
+              ))}
+            </div>
           ))}
         </div>
       )}
@@ -436,6 +523,9 @@ export function HistoryPanel({
   });
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [groupingMode, setGroupingMode] = useState<'project' | 'date'>('project');
+  const [favoriteIds, setFavoriteIds] = useState<Set<string>>(getFavoriteIds);
+  const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [isResizing, setIsResizing] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -511,12 +601,38 @@ export function HistoryPanel({
     });
   }, []);
 
+  const handleToggleFavorite = useCallback(async (sessionId: string, projectDirName: string) => {
+    setFavoriteIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(sessionId)) {
+        next.delete(sessionId);
+      } else {
+        next.add(sessionId);
+        // Archive on star
+        import('@tauri-apps/api/core').then(({ invoke }) => {
+          invoke('archive_session', { sessionId, projectDirName }).catch(console.error);
+        });
+      }
+      saveFavoriteIds(next);
+      return next;
+    });
+  }, []);
+
   const filteredProjects = useMemo(() => {
     if (!history) return [];
-    if (!searchQuery.trim()) return history.projects;
+
+    // Apply favorites filter first
+    let projects = history.projects;
+    if (showFavoritesOnly) {
+      projects = projects
+        .map((p) => ({ ...p, sessions: p.sessions.filter((s) => favoriteIds.has(s.sessionId)) }))
+        .filter((p) => p.sessions.length > 0);
+    }
+
+    if (!searchQuery.trim()) return projects;
 
     const q = searchQuery.toLowerCase();
-    return history.projects
+    return projects
       .map((project) => {
         const matchesProject =
           project.projectName.toLowerCase().includes(q) ||
@@ -533,7 +649,52 @@ export function HistoryPanel({
         return { ...project, sessions: matchedSessions };
       })
       .filter((project) => project.sessions.length > 0);
-  }, [history, searchQuery]);
+  }, [history, searchQuery, showFavoritesOnly, favoriteIds]);
+
+  // "By Date" mode: flatten all sessions, group by date
+  const dateGroupedView = useMemo(() => {
+    if (groupingMode !== 'date' || !history) return [];
+
+    type FlatSession = HistorySession & { projectName: string; projectDirName: string };
+
+    // Apply favorites filter
+    let projects = history.projects;
+    if (showFavoritesOnly) {
+      projects = projects
+        .map((p) => ({ ...p, sessions: p.sessions.filter((s) => favoriteIds.has(s.sessionId)) }))
+        .filter((p) => p.sessions.length > 0);
+    }
+
+    const allSessions: FlatSession[] = projects.flatMap((p) =>
+      p.sessions.map((s) => ({ ...s, projectName: p.projectName, projectDirName: p.projectDirName }))
+    );
+
+    const q = searchQuery.toLowerCase();
+    const filtered = q
+      ? allSessions.filter(
+          (s) =>
+            s.projectName.toLowerCase().includes(q) ||
+            (s.gitBranch?.toLowerCase().includes(q) ?? false) ||
+            s.recentMessages.some((m) => m.text.toLowerCase().includes(q)) ||
+            (getCustomName(s.sessionId)?.toLowerCase().includes(q) ?? false)
+        )
+      : allSessions;
+
+    filtered.sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
+
+    const groups: { label: string; sessions: FlatSession[] }[] = [];
+    let currentLabel = '';
+    for (const s of filtered) {
+      const label = getDateGroupLabel(s.lastActivityAt);
+      if (label !== currentLabel) {
+        groups.push({ label, sessions: [s] });
+        currentLabel = label;
+      } else {
+        groups[groups.length - 1].sessions.push(s);
+      }
+    }
+    return groups;
+  }, [history, groupingMode, searchQuery, showFavoritesOnly, favoriteIds]);
 
   // Collapsed rail
   if (!isExpanded) {
@@ -563,10 +724,33 @@ export function HistoryPanel({
       style={{ width: `${panelWidth}px`, minWidth: `${MIN_PANEL_WIDTH}px`, maxWidth: `${MAX_PANEL_WIDTH}px` }}
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-3 border-b border-border shrink-0">
-        <span className="text-xs font-semibold text-foreground tracking-widest uppercase">
-          History
-        </span>
+      <div className="flex items-center justify-between px-3 py-2.5 border-b border-border shrink-0">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-semibold text-foreground tracking-widest uppercase">
+            History
+          </span>
+          <div className="flex text-[10px] bg-muted/50 rounded overflow-hidden">
+            <button
+              onClick={() => setGroupingMode('project')}
+              className={`px-2 py-0.5 transition-colors ${groupingMode === 'project' ? 'bg-foreground/15 text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            >
+              Project
+            </button>
+            <button
+              onClick={() => setGroupingMode('date')}
+              className={`px-2 py-0.5 transition-colors ${groupingMode === 'date' ? 'bg-foreground/15 text-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+            >
+              Date
+            </button>
+          </div>
+          <button
+            onClick={() => setShowFavoritesOnly((p) => !p)}
+            className={`p-0.5 rounded transition-colors ${showFavoritesOnly ? 'text-amber-400' : 'text-muted-foreground hover:text-amber-400'}`}
+            title={showFavoritesOnly ? 'Show all' : 'Show favorites only'}
+          >
+            <StarIcon filled={showFavoritesOnly} />
+          </button>
+        </div>
         <button
           onClick={handleToggleExpand}
           className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors"
@@ -608,7 +792,7 @@ export function HistoryPanel({
           </div>
         )}
 
-        {!isLoading && !error && filteredProjects.length === 0 && (
+        {!isLoading && !error && groupingMode === 'project' && filteredProjects.length === 0 && (
           <div className="flex items-center justify-center py-8">
             <span className="text-xs text-muted-foreground">
               {searchQuery.trim() ? 'No results found' : 'No session history'}
@@ -616,7 +800,16 @@ export function HistoryPanel({
           </div>
         )}
 
-        {!isLoading && !error && filteredProjects.map((project, index) => (
+        {!isLoading && !error && groupingMode === 'date' && dateGroupedView.length === 0 && (
+          <div className="flex items-center justify-center py-8">
+            <span className="text-xs text-muted-foreground">
+              {searchQuery.trim() ? 'No results found' : 'No session history'}
+            </span>
+          </div>
+        )}
+
+        {/* By Project mode */}
+        {!isLoading && !error && groupingMode === 'project' && filteredProjects.map((project) => (
           <ProjectGroup
             key={project.projectPath}
             project={project}
@@ -624,8 +817,45 @@ export function HistoryPanel({
             onToggle={handleToggleGroup}
             onResumeSession={onResumeSession}
             onDeleteSession={onDeleteSession}
-            colorIndex={index}
+            favoriteIds={favoriteIds}
+            onToggleFavorite={handleToggleFavorite}
           />
+        ))}
+
+        {/* By Date mode */}
+        {!isLoading && !error && groupingMode === 'date' && dateGroupedView.map((group) => (
+          <div key={group.label} className="mb-1 rounded-md overflow-hidden">
+            <button
+              onClick={() => handleToggleGroup(group.label)}
+              className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded hover:bg-muted/30 transition-colors"
+            >
+              <ChevronDownIcon collapsed={collapsedGroups.has(group.label)} />
+              <div className="flex-1 min-w-0 text-left">
+                <div className="text-xs font-medium text-foreground">
+                  {group.label}
+                </div>
+              </div>
+              <span className="text-xs text-muted-foreground shrink-0 ml-1">
+                {group.sessions.length}
+              </span>
+            </button>
+            {!collapsedGroups.has(group.label) && (
+              <div className="ml-4 mr-1 mb-1 space-y-0.5 border-l border-border/40 pl-2">
+                {group.sessions.map((session) => (
+                  <SessionEntry
+                    key={session.sessionId}
+                    session={session}
+                    onResume={onResumeSession}
+                    onDelete={(id) => onDeleteSession(id, (session as any).projectDirName)}
+                    showProjectName={(session as any).projectName}
+                    isFavorited={favoriteIds.has(session.sessionId)}
+                    onToggleFavorite={(id) => handleToggleFavorite(id, (session as any).projectDirName)}
+                    accentColor={getProjectAccentColor((session as any).projectName)}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
         ))}
       </div>
 

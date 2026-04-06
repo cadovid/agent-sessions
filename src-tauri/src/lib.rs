@@ -17,7 +17,7 @@ use tauri::{
 };
 use std::sync::Mutex;
 
-use commands::{get_all_sessions, focus_session, update_tray_title, register_shortcut, unregister_shortcut, kill_session, get_session_history, resume_session, delete_history_session};
+use commands::{get_all_sessions, focus_session, update_tray_title, register_shortcut, unregister_shortcut, kill_session, get_session_history, resume_session, delete_history_session, open_in_editor, archive_session, update_tray_menu};
 
 // Store tray icon ID for updates
 static TRAY_ID: Mutex<Option<String>> = Mutex::new(None);
@@ -30,7 +30,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_all_sessions, focus_session, update_tray_title, register_shortcut, unregister_shortcut, kill_session, get_session_history, resume_session, delete_history_session])
+        .invoke_handler(tauri::generate_handler![get_all_sessions, focus_session, update_tray_title, register_shortcut, unregister_shortcut, kill_session, get_session_history, resume_session, delete_history_session, open_in_editor, archive_session, update_tray_menu])
         .setup(|app| {
             // Create menu for tray
             let show_item = MenuItemBuilder::with_id("show", "Show Window")
@@ -54,15 +54,25 @@ pub fn run() {
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| {
-                    match event.id().as_ref() {
-                        "show" => {
+                    let id = event.id().as_ref().to_string();
+                    match id.as_str() {
+                        "show" | "header" => {
                             if let Some(window) = app.get_webview_window("main") {
+                                let _ = window.unminimize();
                                 let _ = window.show();
                                 let _ = window.set_focus();
+                                let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
                             }
                         }
                         "quit" => {
                             app.exit(0);
+                        }
+                        _ if id.starts_with("session-") => {
+                            if let Some(pid_str) = id.strip_prefix("session-") {
+                                if let Ok(pid) = pid_str.parse::<u32>() {
+                                    let _ = terminal::focus_terminal_for_pid(pid);
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -71,8 +81,10 @@ pub fn run() {
                     if let tauri::tray::TrayIconEvent::Click { button: tauri::tray::MouseButton::Left, .. } = event {
                         let app = tray.app_handle();
                         if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.unminimize();
                             let _ = window.show();
                             let _ = window.set_focus();
+                            let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
                         }
                     }
                 })

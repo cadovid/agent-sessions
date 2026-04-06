@@ -104,6 +104,20 @@ export function useSessions() {
 
       // Update tray icon title with counts
       await updateTrayTitle(response.totalCount, response.waitingCount);
+
+      // Update tray menu with session list (use custom names if available)
+      let customNames: Record<string, string> = {};
+      try {
+        const stored = localStorage.getItem('agent-sessions-custom-names');
+        if (stored) customNames = JSON.parse(stored);
+      } catch { /* ignore */ }
+
+      const trayItems = response.sessions.map(s => ({
+        pid: s.pid,
+        projectName: customNames[s.id] || s.projectName,
+        status: ['processing', 'thinking', 'compacting'].includes(s.status) ? 'active' : 'idle',
+      }));
+      await invoke('update_tray_menu', { sessions: trayItems }).catch(console.error);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch sessions');
     } finally {
