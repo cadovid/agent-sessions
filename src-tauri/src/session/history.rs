@@ -394,31 +394,9 @@ pub struct SessionEvent {
     pub raw_json: String,
 }
 
-/// Read all events from a session JSONL file for the Event Inspector.
-pub fn get_session_events(session_id: &str, project_dir_name: &str) -> Result<Vec<SessionEvent>, String> {
-    // Try live directory first, then archive
-    let claude_dir = dirs::home_dir()
-        .ok_or("Cannot determine home directory")?
-        .join(".claude")
-        .join("projects")
-        .join(project_dir_name);
-
-    let mut jsonl_path = claude_dir.join(format!("{}.jsonl", session_id));
-
-    if !jsonl_path.exists() {
-        if let Some(archive_dir) = get_archive_base_dir() {
-            let archive_path = archive_dir.join(project_dir_name).join(format!("{}.jsonl", session_id));
-            if archive_path.exists() {
-                jsonl_path = archive_path;
-            } else {
-                return Err("Session file not found".to_string());
-            }
-        } else {
-            return Err("Session file not found".to_string());
-        }
-    }
-
-    let file = File::open(&jsonl_path)
+/// Parse a JSONL file into SessionEvent objects.
+fn parse_jsonl_events(jsonl_path: &PathBuf) -> Result<Vec<SessionEvent>, String> {
+    let file = File::open(jsonl_path)
         .map_err(|e| format!("Failed to open session file: {}", e))?;
     let reader = BufReader::new(file);
 
@@ -435,7 +413,6 @@ pub fn get_session_events(session_id: &str, project_dir_name: &str) -> Result<Ve
 
         let raw_json = line.clone();
 
-        // Parse loosely to extract key fields
         let parsed: serde_json::Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(_) => continue,
@@ -455,7 +432,6 @@ pub fn get_session_events(session_id: &str, project_dir_name: &str) -> Result<Ve
             .and_then(|r| r.as_str())
             .map(String::from);
 
-        // Build content preview
         let content_preview = if let Some(message) = parsed.get("message") {
             if let Some(content) = message.get("content") {
                 extract_text_content(content)
@@ -463,11 +439,9 @@ pub fn get_session_events(session_id: &str, project_dir_name: &str) -> Result<Ve
                 None
             }
         } else {
-            // For non-message events, show the type/subtype
-            let subtype = parsed.get("subtype")
+            parsed.get("subtype")
                 .and_then(|v| v.as_str())
-                .map(String::from);
-            subtype
+                .map(String::from)
         };
 
         events.push(SessionEvent {
@@ -481,6 +455,58 @@ pub fn get_session_events(session_id: &str, project_dir_name: &str) -> Result<Ve
     }
 
     Ok(events)
+}
+
+/// Read all events from a session JSONL file for the Event Inspector.
+/// If `project_dir_name` is provided, looks in that specific directory.
+/// If empty, scans all project directories for the session ID.
+pub fn get_session_events(session_id: &str, project_dir_name: &str) -> Result<Vec<SessionEvent>, String> {
+    let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
+    let filename = format!("{}.jsonl", session_id);
+
+    // If project_dir_name is provided, look directly
+    if !project_dir_name.is_empty() {
+        let jsonl_path = home.join(".claude").join("projects").join(project_dir_name).join(&filename);
+        if jsonl_path.exists() {
+            return parse_jsonl_events(&jsonl_path);
+        }
+        // Try archive
+        if let Some(archive_dir) = get_archive_base_dir() {
+            let archive_path = archive_dir.join(project_dir_name).join(&filename);
+            if archive_path.exists() {
+                return parse_jsonl_events(&archive_path);
+            }
+        }
+    }
+
+    // Scan all project directories for the session ID
+    let projects_dir = home.join(".claude").join("projects");
+    if projects_dir.exists() {
+        if let Ok(entries) = fs::read_dir(&projects_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path().join(&filename);
+                if path.exists() {
+                    return parse_jsonl_events(&path);
+                }
+            }
+        }
+    }
+
+    // Try archive directories
+    if let Some(archive_dir) = get_archive_base_dir() {
+        if archive_dir.exists() {
+            if let Ok(entries) = fs::read_dir(&archive_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path().join(&filename);
+                    if path.exists() {
+                        return parse_jsonl_events(&path);
+                    }
+                }
+            }
+        }
+    }
+
+    Err("Session file not found".to_string())
 }
 
 /// Get the archive base directory path.
