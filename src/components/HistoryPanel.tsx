@@ -723,8 +723,8 @@ export function HistoryPanel({
   if (!isExpanded) {
     return (
       <div
-        className="flex flex-col items-center gap-3 py-4 px-2 border-r border-border bg-card/50 cursor-pointer hover:bg-muted/20 transition-colors"
-        style={{ width: '36px', minWidth: '36px' }}
+        className="flex flex-col items-center gap-3 py-4 px-2 border-r border-white/5 cursor-pointer hover:bg-muted/20 transition-colors"
+        style={{ width: '36px', minWidth: '36px', backgroundColor: 'rgba(0, 0, 0, 0.15)' }}
         onClick={handleToggleExpand}
         title="Open history panel"
       >
@@ -743,8 +743,8 @@ export function HistoryPanel({
   return (
     <div
       ref={panelRef}
-      className="flex flex-col bg-card/50 relative"
-      style={{ width: `${panelWidth}px`, minWidth: `${MIN_PANEL_WIDTH}px`, maxWidth: `${MAX_PANEL_WIDTH}px` }}
+      className="flex flex-col relative border-r border-white/5"
+      style={{ width: `${panelWidth}px`, minWidth: `${MIN_PANEL_WIDTH}px`, maxWidth: `${MAX_PANEL_WIDTH}px`, backgroundColor: 'rgba(0, 0, 0, 0.15)' }}
     >
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2.5 border-b border-border shrink-0">

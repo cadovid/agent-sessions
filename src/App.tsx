@@ -55,7 +55,8 @@ function App() {
       {/* Draggable title bar area */}
       <header
         data-tauri-drag-region
-        className="h-14 flex items-center justify-between px-6 border-b border-border bg-card/50 backdrop-blur-sm"
+        className="h-14 flex items-center justify-between px-6 border-b border-border backdrop-blur-sm"
+        style={{ backgroundColor: 'rgba(255, 255, 255, 0.12)' }}
       >
         <div data-tauri-drag-region className="flex items-center gap-4 pl-16">
           <h1 data-tauri-drag-region className="text-lg font-semibold text-foreground">Agent Sessions</h1>
@@ -143,7 +144,7 @@ function App() {
           onResumeSession={resumeSession}
           onDeleteSession={deleteSession}
         />
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="flex-1 overflow-y-auto p-6" style={{ backgroundColor: 'rgba(255, 255, 255, 0.04)' }}>
           {error ? (
             <div className="flex items-center justify-center h-full">
               <div className="p-6 text-destructive text-sm text-center bg-destructive/10 rounded-xl border border-destructive/20 max-w-md">
