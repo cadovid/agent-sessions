@@ -464,6 +464,7 @@ export function SessionCard({ session, onClick }: SessionCardProps) {
         sessionId={session.id}
         projectDirName=""
         sessionLabel={displayName}
+        isLive
       />
     </>
   );
