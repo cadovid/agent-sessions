@@ -11,6 +11,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Markdown } from './Markdown';
+import { EventInspector } from './EventInspector';
 
 const HISTORY_PANEL_EXPANDED_KEY = 'agent-sessions-history-panel-expanded';
 const HISTORY_PANEL_WIDTH_KEY = 'agent-sessions-history-panel-width';
@@ -230,6 +231,116 @@ function MessageLine({ msg, index, isHovered, hoverRect, onHoverEnter, onHoverLe
   );
 }
 
+// Subagent hierarchy section within a session
+function SubagentSection({
+  subagents,
+  sessionId,
+  projectDirName,
+  accentColor,
+}: {
+  subagents: import('../types/session').SubagentInfo[];
+  sessionId: string;
+  projectDirName: string;
+  accentColor?: string;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(10);
+  const [inspectAgent, setInspectAgent] = useState<import('../types/session').SubagentInfo | null>(null);
+
+  const shown = expanded ? subagents.slice(0, visibleCount) : [];
+  const remaining = subagents.length - visibleCount;
+
+  return (
+    <>
+      <div className="ml-5 mr-2 mb-1 pl-2">
+        <button
+          onClick={() => setExpanded((p) => !p)}
+          className="flex items-center gap-1.5 text-[10px] text-muted-foreground hover:text-foreground transition-colors py-1"
+        >
+          <svg
+            className={`w-2.5 h-2.5 transition-transform ${expanded ? '' : '-rotate-90'}`}
+            fill="none" stroke="currentColor" viewBox="0 0 24 24"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" />
+          </svg>
+          <span className="font-medium">{subagents.length} subagent{subagents.length !== 1 ? 's' : ''}</span>
+        </button>
+
+        {expanded && (
+          <div className="ml-3 border-l border-purple-500/20 pl-2 space-y-0.5">
+            {shown.map((agent) => (
+              <div
+                key={agent.agentId}
+                className="group flex items-start gap-2 py-1 px-1 rounded hover:bg-muted/20 cursor-pointer"
+                onClick={() => setInspectAgent(agent)}
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[9px] font-medium px-1.5 py-0.5 rounded bg-purple-500/20 text-purple-400 border border-purple-500/30">
+                      Agent
+                    </span>
+                    <span className="text-[10px] text-foreground/70 truncate">
+                      {agent.slug || agent.agentId.slice(0, 12)}
+                    </span>
+                    <span className="text-[9px] text-muted-foreground/50">
+                      {agent.eventCount} events
+                    </span>
+                  </div>
+                  {agent.taskDescription && (
+                    <div className="text-[10px] text-foreground/50 line-clamp-1 mt-0.5 ml-0.5">
+                      {agent.taskDescription}
+                    </div>
+                  )}
+                </div>
+                {/* Inspect button */}
+                <button
+                  onClick={(e) => { e.stopPropagation(); setInspectAgent(agent); }}
+                  className="p-0.5 rounded text-muted-foreground/40 hover:text-blue-400 hover:bg-blue-400/10 opacity-0 group-hover:opacity-100 transition-all shrink-0 mt-0.5"
+                  title="Inspect subagent"
+                >
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                </button>
+              </div>
+            ))}
+
+            {expanded && remaining > 0 && (
+              <button
+                onClick={() => setVisibleCount((p) => Math.min(p + 10, subagents.length))}
+                className="text-[10px] text-muted-foreground hover:text-foreground transition-colors ml-1 py-0.5"
+              >
+                +{Math.min(remaining, 10)} more
+              </button>
+            )}
+            {visibleCount > 10 && (
+              <button
+                onClick={() => setVisibleCount(10)}
+                className="text-[10px] text-muted-foreground hover:text-foreground transition-colors ml-1 py-0.5"
+              >
+                collapse
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Subagent inspector */}
+      {inspectAgent && (
+        <EventInspector
+          open={!!inspectAgent}
+          onClose={() => setInspectAgent(null)}
+          sessionId={sessionId}
+          projectDirName={projectDirName}
+          sessionLabel={inspectAgent.slug || inspectAgent.agentId.slice(0, 12)}
+          accentColor={accentColor}
+          agentId={inspectAgent.agentId}
+        />
+      )}
+    </>
+  );
+}
+
 interface SessionEntryProps {
   session: HistorySession;
   onResume: (sessionId: string, cwd: string) => void;
@@ -238,11 +349,13 @@ interface SessionEntryProps {
   isFavorited?: boolean;
   onToggleFavorite?: (sessionId: string) => void;
   accentColor?: string;
+  projectDirName: string;
 }
 
-function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorited, onToggleFavorite, accentColor }: SessionEntryProps) {
+function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorited, onToggleFavorite, accentColor, projectDirName }: SessionEntryProps) {
   const customName = getCustomName(session.sessionId);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(1);
   // Single active hover: index + rect (only one message hovered at a time)
   const [activeHover, setActiveHover] = useState<{ index: number; rect: DOMRect } | null>(null);
@@ -325,7 +438,7 @@ function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorite
               )}
             </div>
           </button>
-          {/* Star + Delete buttons */}
+          {/* Star + Inspect + Delete buttons */}
           <div className="flex items-center gap-0.5 shrink-0 mt-0.5">
             {onToggleFavorite && (
               <button
@@ -336,6 +449,15 @@ function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorite
                 <StarIcon filled={!!isFavorited} />
               </button>
             )}
+            <button
+              onClick={(e) => { e.stopPropagation(); setInspectorOpen(true); }}
+              className="p-0.5 rounded text-muted-foreground/40 hover:text-blue-400 hover:bg-blue-400/10 opacity-0 group-hover:opacity-100 transition-all"
+              title="Inspect events"
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+            </button>
             <button
               onClick={handleDeleteClick}
               className="p-0.5 rounded text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 transition-all"
@@ -391,6 +513,16 @@ function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorite
             No messages
           </div>
         )}
+
+        {/* Subagent hierarchy */}
+        {session.subagents.length > 0 && (
+          <SubagentSection
+            subagents={session.subagents}
+            sessionId={session.sessionId}
+            projectDirName={projectDirName}
+            accentColor={accentColor}
+          />
+        )}
       </div>
 
       {/* Delete confirmation dialog */}
@@ -408,6 +540,16 @@ function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorite
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Event Inspector */}
+      <EventInspector
+        open={inspectorOpen}
+        onClose={() => setInspectorOpen(false)}
+        sessionId={session.sessionId}
+        projectDirName={projectDirName}
+        sessionLabel={customName || showProjectName || session.sessionId.slice(0, 8)}
+        accentColor={accentColor}
+      />
     </>
   );
 }
@@ -484,6 +626,7 @@ function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDelet
                   isFavorited={favoriteIds.has(session.sessionId)}
                   onToggleFavorite={handleFavorite}
                   accentColor={accentColor}
+                  projectDirName={project.projectDirName}
                 />
               ))}
             </div>
@@ -700,8 +843,8 @@ export function HistoryPanel({
   if (!isExpanded) {
     return (
       <div
-        className="flex flex-col items-center gap-3 py-4 px-2 border-r border-border bg-card/50 cursor-pointer hover:bg-muted/20 transition-colors"
-        style={{ width: '36px', minWidth: '36px' }}
+        className="flex flex-col items-center gap-3 py-4 px-2 border-r border-white/5 cursor-pointer hover:bg-muted/20 transition-colors"
+        style={{ width: '36px', minWidth: '36px', backgroundColor: 'rgba(0, 0, 0, 0.15)' }}
         onClick={handleToggleExpand}
         title="Open history panel"
       >
@@ -720,8 +863,8 @@ export function HistoryPanel({
   return (
     <div
       ref={panelRef}
-      className="flex flex-col bg-card/50 relative"
-      style={{ width: `${panelWidth}px`, minWidth: `${MIN_PANEL_WIDTH}px`, maxWidth: `${MAX_PANEL_WIDTH}px` }}
+      className="flex flex-col relative border-r border-white/5"
+      style={{ width: `${panelWidth}px`, minWidth: `${MIN_PANEL_WIDTH}px`, maxWidth: `${MAX_PANEL_WIDTH}px`, backgroundColor: 'rgba(0, 0, 0, 0.15)' }}
     >
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-2.5 border-b border-border shrink-0">
@@ -851,6 +994,7 @@ export function HistoryPanel({
                     isFavorited={favoriteIds.has(session.sessionId)}
                     onToggleFavorite={(id) => handleToggleFavorite(id, (session as any).projectDirName)}
                     accentColor={getProjectAccentColor((session as any).projectName)}
+                    projectDirName={(session as any).projectDirName}
                   />
                 ))}
               </div>

@@ -29,12 +29,21 @@ export interface MessagePreview {
   role: string;
 }
 
+export interface SubagentInfo {
+  agentId: string;
+  slug: string | null;
+  taskDescription: string | null;
+  timestamp: string | null;
+  eventCount: number;
+}
+
 export interface HistorySession {
   sessionId: string;
   cwd: string;
   lastActivityAt: string;
   gitBranch: string | null;
   recentMessages: MessagePreview[];
+  subagents: SubagentInfo[];
 }
 
 export interface ProjectHistory {
@@ -46,4 +55,13 @@ export interface ProjectHistory {
 
 export interface SessionHistoryResponse {
   projects: ProjectHistory[];
+}
+
+export interface SessionEvent {
+  index: number;
+  timestamp: string | null;
+  eventType: string;
+  role: string | null;
+  contentPreview: string | null;
+  rawJson: string;
 }

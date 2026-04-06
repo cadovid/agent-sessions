@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Session } from '../types/session';
 import { Markdown } from './Markdown';
+import { EventInspector } from './EventInspector';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -127,6 +128,7 @@ export function SessionCard({ session, onClick }: SessionCardProps) {
   const [customUrl, setCustomUrlState] = useState<string>('');
   const [isRenameOpen, setIsRenameOpen] = useState(false);
   const [isUrlOpen, setIsUrlOpen] = useState(false);
+  const [isInspectorOpen, setIsInspectorOpen] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const [urlValue, setUrlValue] = useState('');
 
@@ -310,6 +312,22 @@ export function SessionCard({ session, onClick }: SessionCardProps) {
                       Open GitHub
                     </DropdownMenuItem>
                   )}
+                  <DropdownMenuItem onClick={() => setIsInspectorOpen(true)}>
+                    <svg
+                      className="w-4 h-4 mr-2"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                      />
+                    </svg>
+                    Inspect Events
+                  </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={handleKillSession} className="text-destructive focus:text-destructive">
                     <svg
@@ -438,6 +456,16 @@ export function SessionCard({ session, onClick }: SessionCardProps) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Event Inspector */}
+      <EventInspector
+        open={isInspectorOpen}
+        onClose={() => setIsInspectorOpen(false)}
+        sessionId={session.id}
+        projectDirName=""
+        sessionLabel={displayName}
+        isLive
+      />
     </>
   );
 }
