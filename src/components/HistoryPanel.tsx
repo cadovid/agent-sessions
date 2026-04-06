@@ -11,6 +11,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Markdown } from './Markdown';
+import { EventInspector } from './EventInspector';
 
 const HISTORY_PANEL_EXPANDED_KEY = 'agent-sessions-history-panel-expanded';
 const HISTORY_PANEL_WIDTH_KEY = 'agent-sessions-history-panel-width';
@@ -238,11 +239,13 @@ interface SessionEntryProps {
   isFavorited?: boolean;
   onToggleFavorite?: (sessionId: string) => void;
   accentColor?: string;
+  projectDirName: string;
 }
 
-function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorited, onToggleFavorite, accentColor }: SessionEntryProps) {
+function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorited, onToggleFavorite, accentColor, projectDirName }: SessionEntryProps) {
   const customName = getCustomName(session.sessionId);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(1);
   // Single active hover: index + rect (only one message hovered at a time)
   const [activeHover, setActiveHover] = useState<{ index: number; rect: DOMRect } | null>(null);
@@ -325,7 +328,7 @@ function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorite
               )}
             </div>
           </button>
-          {/* Star + Delete buttons */}
+          {/* Star + Inspect + Delete buttons */}
           <div className="flex items-center gap-0.5 shrink-0 mt-0.5">
             {onToggleFavorite && (
               <button
@@ -336,6 +339,15 @@ function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorite
                 <StarIcon filled={!!isFavorited} />
               </button>
             )}
+            <button
+              onClick={(e) => { e.stopPropagation(); setInspectorOpen(true); }}
+              className="p-0.5 rounded text-muted-foreground/40 hover:text-blue-400 hover:bg-blue-400/10 opacity-0 group-hover:opacity-100 transition-all"
+              title="Inspect events"
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+            </button>
             <button
               onClick={handleDeleteClick}
               className="p-0.5 rounded text-muted-foreground/40 hover:text-destructive hover:bg-destructive/10 opacity-0 group-hover:opacity-100 transition-all"
@@ -408,6 +420,16 @@ function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorite
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Event Inspector */}
+      <EventInspector
+        open={inspectorOpen}
+        onClose={() => setInspectorOpen(false)}
+        sessionId={session.sessionId}
+        projectDirName={projectDirName}
+        sessionLabel={customName || showProjectName || session.sessionId.slice(0, 8)}
+        accentColor={accentColor}
+      />
     </>
   );
 }
@@ -484,6 +506,7 @@ function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDelet
                   isFavorited={favoriteIds.has(session.sessionId)}
                   onToggleFavorite={handleFavorite}
                   accentColor={accentColor}
+                  projectDirName={project.projectDirName}
                 />
               ))}
             </div>
@@ -851,6 +874,7 @@ export function HistoryPanel({
                     isFavorited={favoriteIds.has(session.sessionId)}
                     onToggleFavorite={(id) => handleToggleFavorite(id, (session as any).projectDirName)}
                     accentColor={getProjectAccentColor((session as any).projectName)}
+                    projectDirName={(session as any).projectDirName}
                   />
                 ))}
               </div>

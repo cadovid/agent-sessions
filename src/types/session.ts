@@ -47,3 +47,12 @@ export interface ProjectHistory {
 export interface SessionHistoryResponse {
   projects: ProjectHistory[];
 }
+
+export interface SessionEvent {
+  index: number;
+  timestamp: string | null;
+  eventType: string;
+  role: string | null;
+  contentPreview: string | null;
+  rawJson: string;
+}

@@ -382,6 +382,107 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
     Ok(())
 }
 
+/// A single JSONL event for the Event Inspector.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionEvent {
+    pub index: usize,
+    pub timestamp: Option<String>,
+    pub event_type: String,
+    pub role: Option<String>,
+    pub content_preview: Option<String>,
+    pub raw_json: String,
+}
+
+/// Read all events from a session JSONL file for the Event Inspector.
+pub fn get_session_events(session_id: &str, project_dir_name: &str) -> Result<Vec<SessionEvent>, String> {
+    // Try live directory first, then archive
+    let claude_dir = dirs::home_dir()
+        .ok_or("Cannot determine home directory")?
+        .join(".claude")
+        .join("projects")
+        .join(project_dir_name);
+
+    let mut jsonl_path = claude_dir.join(format!("{}.jsonl", session_id));
+
+    if !jsonl_path.exists() {
+        if let Some(archive_dir) = get_archive_base_dir() {
+            let archive_path = archive_dir.join(project_dir_name).join(format!("{}.jsonl", session_id));
+            if archive_path.exists() {
+                jsonl_path = archive_path;
+            } else {
+                return Err("Session file not found".to_string());
+            }
+        } else {
+            return Err("Session file not found".to_string());
+        }
+    }
+
+    let file = File::open(&jsonl_path)
+        .map_err(|e| format!("Failed to open session file: {}", e))?;
+    let reader = BufReader::new(file);
+
+    let mut events = Vec::new();
+    for (i, line) in reader.lines().enumerate() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let raw_json = line.clone();
+
+        // Parse loosely to extract key fields
+        let parsed: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let timestamp = parsed.get("timestamp")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let msg_type = parsed.get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let role = parsed.get("message")
+            .and_then(|m| m.get("role"))
+            .and_then(|r| r.as_str())
+            .map(String::from);
+
+        // Build content preview
+        let content_preview = if let Some(message) = parsed.get("message") {
+            if let Some(content) = message.get("content") {
+                extract_text_content(content)
+            } else {
+                None
+            }
+        } else {
+            // For non-message events, show the type/subtype
+            let subtype = parsed.get("subtype")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            subtype
+        };
+
+        events.push(SessionEvent {
+            index: i,
+            timestamp,
+            event_type: msg_type,
+            role,
+            content_preview,
+            raw_json,
+        });
+    }
+
+    Ok(events)
+}
+
 /// Get the archive base directory path.
 fn get_archive_base_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("agent-sessions").join("archives"))
