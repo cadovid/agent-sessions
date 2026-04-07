@@ -11,7 +11,8 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { Markdown } from './Markdown';
-import { EventInspector } from './EventInspector';
+import { lazy, Suspense } from 'react';
+const EventInspector = lazy(() => import('./EventInspector'));
 
 const HISTORY_PANEL_EXPANDED_KEY = 'agent-sessions-history-panel-expanded';
 const HISTORY_PANEL_WIDTH_KEY = 'agent-sessions-history-panel-width';
@@ -44,14 +45,12 @@ function StarIcon({ filled }: { filled: boolean }) {
   );
 }
 
-function getCustomName(sessionId: string): string | null {
+function readCustomNamesMap(): Record<string, string> {
   try {
     const stored = localStorage.getItem(CUSTOM_NAMES_KEY);
-    if (!stored) return null;
-    const names: Record<string, string> = JSON.parse(stored);
-    return names[sessionId] || null;
+    return stored ? JSON.parse(stored) : {};
   } catch {
-    return null;
+    return {};
   }
 }
 
@@ -325,17 +324,19 @@ function SubagentSection({
         )}
       </div>
 
-      {/* Subagent inspector */}
+      {/* Subagent inspector (lazy loaded) */}
       {inspectAgent && (
-        <EventInspector
-          open={!!inspectAgent}
-          onClose={() => setInspectAgent(null)}
-          sessionId={sessionId}
-          projectDirName={projectDirName}
-          sessionLabel={inspectAgent.slug || inspectAgent.agentId.slice(0, 12)}
-          accentColor={accentColor}
-          agentId={inspectAgent.agentId}
-        />
+        <Suspense fallback={null}>
+          <EventInspector
+            open={!!inspectAgent}
+            onClose={() => setInspectAgent(null)}
+            sessionId={sessionId}
+            projectDirName={projectDirName}
+            sessionLabel={inspectAgent.slug || inspectAgent.agentId.slice(0, 12)}
+            accentColor={accentColor}
+            agentId={inspectAgent.agentId}
+          />
+        </Suspense>
       )}
     </>
   );
@@ -350,10 +351,10 @@ interface SessionEntryProps {
   onToggleFavorite?: (sessionId: string) => void;
   accentColor?: string;
   projectDirName: string;
+  customName?: string | null;
 }
 
-function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorited, onToggleFavorite, accentColor, projectDirName }: SessionEntryProps) {
-  const customName = getCustomName(session.sessionId);
+function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorited, onToggleFavorite, accentColor, projectDirName, customName }: SessionEntryProps) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(1);
@@ -541,15 +542,19 @@ function SessionEntry({ session, onResume, onDelete, showProjectName, isFavorite
         </DialogContent>
       </Dialog>
 
-      {/* Event Inspector */}
-      <EventInspector
-        open={inspectorOpen}
-        onClose={() => setInspectorOpen(false)}
-        sessionId={session.sessionId}
-        projectDirName={projectDirName}
-        sessionLabel={customName || showProjectName || session.sessionId.slice(0, 8)}
-        accentColor={accentColor}
-      />
+      {/* Event Inspector (lazy loaded) */}
+      {inspectorOpen && (
+        <Suspense fallback={null}>
+          <EventInspector
+            open={inspectorOpen}
+            onClose={() => setInspectorOpen(false)}
+            sessionId={session.sessionId}
+            projectDirName={projectDirName}
+            sessionLabel={customName || showProjectName || session.sessionId.slice(0, 8)}
+            accentColor={accentColor}
+          />
+        </Suspense>
+      )}
     </>
   );
 }
@@ -562,6 +567,7 @@ interface ProjectGroupProps {
   onDeleteSession: (sessionId: string, projectDirName: string) => void;
   favoriteIds: Set<string>;
   onToggleFavorite: (sessionId: string, projectDirName: string) => void;
+  customNamesMap: Record<string, string>;
 }
 
 function groupSessionsByDate(sessions: HistorySession[]): { label: string; sessions: HistorySession[] }[] {
@@ -579,7 +585,7 @@ function groupSessionsByDate(sessions: HistorySession[]): { label: string; sessi
   return groups;
 }
 
-function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDeleteSession, favoriteIds, onToggleFavorite }: ProjectGroupProps) {
+function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDeleteSession, favoriteIds, onToggleFavorite, customNamesMap }: ProjectGroupProps) {
   const handleDelete = useCallback((sessionId: string) => {
     onDeleteSession(sessionId, project.projectDirName);
   }, [onDeleteSession, project.projectDirName]);
@@ -627,6 +633,7 @@ function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDelet
                   onToggleFavorite={handleFavorite}
                   accentColor={accentColor}
                   projectDirName={project.projectDirName}
+                  customName={customNamesMap[session.sessionId] || null}
                 />
               ))}
             </div>
@@ -669,6 +676,9 @@ export function HistoryPanel({
   const [groupingMode, setGroupingMode] = useState<'project' | 'date'>('project');
   const [favoriteIds, setFavoriteIds] = useState<Set<string>>(getFavoriteIds);
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
+
+  // Read custom names once per render cycle instead of per session entry
+  const customNamesMap = useMemo(() => readCustomNamesMap(), [history, favoriteIds]);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [isResizing, setIsResizing] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -786,7 +796,7 @@ export function HistoryPanel({
             matchesProject ||
             (session.gitBranch?.toLowerCase().includes(q) ?? false) ||
             session.recentMessages.some((m) => m.text.toLowerCase().includes(q)) ||
-            (getCustomName(session.sessionId)?.toLowerCase().includes(q) ?? false)
+            (customNamesMap[session.sessionId]?.toLowerCase().includes(q) ?? false)
         );
 
         return { ...project, sessions: matchedSessions };
@@ -819,7 +829,7 @@ export function HistoryPanel({
             s.projectName.toLowerCase().includes(q) ||
             (s.gitBranch?.toLowerCase().includes(q) ?? false) ||
             s.recentMessages.some((m) => m.text.toLowerCase().includes(q)) ||
-            (getCustomName(s.sessionId)?.toLowerCase().includes(q) ?? false)
+            (customNamesMap[s.sessionId]?.toLowerCase().includes(q) ?? false)
         )
       : allSessions;
 
@@ -962,6 +972,7 @@ export function HistoryPanel({
             onDeleteSession={onDeleteSession}
             favoriteIds={favoriteIds}
             onToggleFavorite={handleToggleFavorite}
+            customNamesMap={customNamesMap}
           />
         ))}
 
@@ -995,6 +1006,7 @@ export function HistoryPanel({
                     onToggleFavorite={(id) => handleToggleFavorite(id, (session as any).projectDirName)}
                     accentColor={getProjectAccentColor((session as any).projectName)}
                     projectDirName={(session as any).projectDirName}
+                    customName={customNamesMap[session.sessionId] || null}
                   />
                 ))}
               </div>

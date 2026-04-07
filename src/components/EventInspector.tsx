@@ -849,3 +849,5 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
 
   return createPortal(panel, document.body);
 }
+
+export default EventInspector;

@@ -43,17 +43,33 @@ fn get_content_preview(content: &serde_json::Value) -> String {
     }
 }
 
+// Cache CWD per session file — CWD is written once at session start and never changes
+static CWD_CACHE: Lazy<Mutex<HashMap<PathBuf, Option<String>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
 /// Extract the cwd (project path) from the first few lines of a JSONL file.
 /// Returns the first valid cwd found, which should be the project root.
 fn extract_cwd_from_jsonl(jsonl_path: &PathBuf) -> Option<String> {
+    // Check cache first
+    {
+        let cache = CWD_CACHE.lock().unwrap();
+        if let Some(cached) = cache.get(jsonl_path) {
+            return cached.clone();
+        }
+    }
+
+    let result = extract_cwd_from_jsonl_uncached(jsonl_path);
+
+    CWD_CACHE.lock().unwrap().insert(jsonl_path.clone(), result.clone());
+    result
+}
+
+fn extract_cwd_from_jsonl_uncached(jsonl_path: &PathBuf) -> Option<String> {
     let file = File::open(jsonl_path).ok()?;
     let reader = BufReader::new(file);
 
-    // Check first 20 lines for a cwd field
     for line in reader.lines().take(20).flatten() {
         if let Ok(msg) = serde_json::from_str::<JsonlMessage>(&line) {
             if let Some(cwd) = msg.cwd {
-                // Claude Code always writes absolute paths
                 if cwd.starts_with('/') {
                     return Some(cwd);
                 }
@@ -538,7 +554,8 @@ pub fn parse_session_file(
         let _ = lines_iter.next();
     }
     let lines: Vec<_> = lines_iter.collect();
-    let recent_lines: Vec<_> = lines.iter().rev().take(500).collect();
+    let start = lines.len().saturating_sub(500);
+    let recent_lines: Vec<&String> = lines[start..].iter().rev().collect();
 
     trace!("File has {} total lines, checking last {}", lines.len(), recent_lines.len());
 

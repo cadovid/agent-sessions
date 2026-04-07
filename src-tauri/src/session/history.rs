@@ -84,32 +84,6 @@ fn extract_text_content(value: &serde_json::Value) -> Option<String> {
 }
 
 /// Read the last `n` lines from a file by seeking to end - 64KB.
-fn read_last_lines(path: &PathBuf, n: usize) -> Vec<String> {
-    let mut file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
-    let file_len = match file.seek(SeekFrom::End(0)) {
-        Ok(len) => len,
-        Err(_) => return Vec::new(),
-    };
-
-    // Seek back up to 256KB from end (enough for ~500 lines)
-    let seek_pos = file_len.saturating_sub(262144);
-    if file.seek(SeekFrom::Start(seek_pos)).is_err() {
-        return Vec::new();
-    }
-
-    let mut buf = String::new();
-    if file.read_to_string(&mut buf).is_err() {
-        return Vec::new();
-    }
-
-    let lines: Vec<String> = buf.lines().map(String::from).collect();
-    lines.into_iter().rev().take(n).collect()
-}
-
 /// Read the first `n` lines from a file.
 fn read_first_lines(path: &PathBuf, n: usize) -> Vec<String> {
     let file = match File::open(path) {
@@ -118,6 +92,35 @@ fn read_first_lines(path: &PathBuf, n: usize) -> Vec<String> {
     };
     let reader = BufReader::new(file);
     reader.lines().take(n).flatten().collect()
+}
+
+/// Read both head and tail of a file in a single open.
+fn read_head_and_tail(path: &PathBuf, head_n: usize, tail_n: usize) -> (Vec<String>, Vec<String>) {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+
+    // Read head
+    let reader = BufReader::new(&file);
+    let head: Vec<String> = reader.lines().take(head_n).flatten().collect();
+
+    // Seek to tail (1MB buffer — large sessions can have many tool/progress events between text messages)
+    let file_len = match file.seek(SeekFrom::End(0)) {
+        Ok(len) => len,
+        Err(_) => return (head, Vec::new()),
+    };
+    let seek_pos = file_len.saturating_sub(1024 * 1024);
+    if file.seek(SeekFrom::Start(seek_pos)).is_err() {
+        return (head, Vec::new());
+    }
+    let mut buf = String::new();
+    if file.read_to_string(&mut buf).is_err() {
+        return (head, Vec::new());
+    }
+    let tail: Vec<String> = buf.lines().map(String::from).rev().take(tail_n).collect();
+
+    (head, tail)
 }
 
 /// Scan the subagents directory for a session and return info about each subagent.
@@ -228,8 +231,8 @@ fn parse_history_session(jsonl_path: &PathBuf) -> Option<HistorySession> {
         .and_then(|s| s.to_str())
         .map(String::from)?;
 
-    // Read last ~500 lines to find timestamp, git_branch, and up to 20 recent messages
-    let last_lines = read_last_lines(jsonl_path, 500);
+    // Read head (first 20 lines for cwd) and tail (last 500 for messages) in a single file open
+    let (first_lines, last_lines) = read_head_and_tail(jsonl_path, 20, 500);
 
     let mut last_activity_at: Option<String> = None;
     let mut git_branch: Option<String> = None;
@@ -243,7 +246,6 @@ fn parse_history_session(jsonl_path: &PathBuf) -> Option<HistorySession> {
             if git_branch.is_none() {
                 git_branch = msg.git_branch.clone();
             }
-            // Collect up to 20 meaningful messages (most recent first)
             if recent_messages.len() < 20 {
                 if let Some(content) = &msg.message {
                     if let Some(c) = &content.content {
@@ -256,9 +258,6 @@ fn parse_history_session(jsonl_path: &PathBuf) -> Option<HistorySession> {
             }
         }
     }
-
-    // Read first ~20 lines to extract cwd
-    let first_lines = read_first_lines(jsonl_path, 20);
     let mut cwd: Option<String> = None;
     for line in &first_lines {
         if let Ok(msg) = serde_json::from_str::<JsonlMessage>(line) {
