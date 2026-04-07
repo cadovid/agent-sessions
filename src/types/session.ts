@@ -64,5 +64,4 @@ export interface SessionEvent {
   role: string | null;
   toolName: string | null;
   contentPreview: string | null;
-  rawJson: string;
 }

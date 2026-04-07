@@ -254,6 +254,49 @@ function useDebouncedValue<T>(value: T, delay: number): T {
   return debounced;
 }
 
+// Virtual scroll for event list
+const ROW_HEIGHT = 52;
+const OVERSCAN = 10;
+
+function useVirtualScroll(itemCount: number) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const [containerHeight, setContainerHeight] = useState(0);
+  const containerElRef = useRef<HTMLDivElement | null>(null);
+  const observerRef = useRef<ResizeObserver | null>(null);
+
+  // Callback ref: called when the DOM element mounts/unmounts
+  const setContainerRef = useCallback((el: HTMLDivElement | null) => {
+    // Cleanup previous
+    if (containerElRef.current) {
+      containerElRef.current.removeEventListener('scroll', handleScroll);
+      observerRef.current?.disconnect();
+    }
+
+    containerElRef.current = el;
+
+    if (el) {
+      el.addEventListener('scroll', handleScroll, { passive: true });
+      observerRef.current = new ResizeObserver((entries) => {
+        for (const entry of entries) setContainerHeight(entry.contentRect.height);
+      });
+      observerRef.current.observe(el);
+      setContainerHeight(el.clientHeight);
+      setScrollTop(el.scrollTop);
+    }
+
+    function handleScroll() {
+      if (containerElRef.current) setScrollTop(containerElRef.current.scrollTop);
+    }
+  }, []);
+
+  const totalHeight = itemCount * ROW_HEIGHT;
+  const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+  const visibleCount = Math.ceil(containerHeight / ROW_HEIGHT) + 2 * OVERSCAN;
+  const endIndex = Math.min(itemCount - 1, startIndex + visibleCount);
+
+  return { totalHeight, startIndex, endIndex, setContainerRef, containerElRef };
+}
+
 export function EventInspector({ open, onClose, sessionId, projectDirName, sessionLabel, accentColor, isLive, agentId }: EventInspectorProps) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -264,6 +307,10 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
   const [viewMode, setViewMode] = useState<ViewMode>('timeline');
   const [searchQuery, setSearchQuery] = useState('');
   const debouncedSearch = useDebouncedValue(searchQuery, 200);
+
+  // Lazy rawJson loading
+  const [rawJsonCache, setRawJsonCache] = useState<Map<number, string>>(new Map());
+  const [selectedRawJson, setSelectedRawJson] = useState<string | null>(null);
 
   // Dialog position + size
   const [dialogSize, setDialogSize] = useState({ width: 900, height: 600 });
@@ -278,8 +325,7 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
   const [isResizingSplit, setIsResizingSplit] = useState(false);
   const splitContainerRef = useRef<HTMLDivElement>(null);
 
-  // Event list scroll ref for navigation
-  const eventListRef = useRef<HTMLDivElement>(null);
+  // Virtual scroll removes the need for a separate eventListRef
 
   // Reset position when opening
   useEffect(() => {
@@ -368,12 +414,31 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
     return () => { document.removeEventListener('mousemove', handleMove); document.removeEventListener('mouseup', handleUp); document.body.style.userSelect = ''; document.body.style.cursor = ''; };
   }, [isResizingSplit]);
 
-  // Load events
+  // Load events (initial full load)
   const loadEvents = useCallback(() => {
-    return invoke<SessionEvent[]>('get_session_events', { sessionId, projectDirName, agentId: agentId || null })
+    return invoke<SessionEvent[]>('get_session_events', { sessionId, projectDirName, agentId: agentId || null, afterIndex: null })
       .then(setEvents)
       .catch((e) => setError(String(e)));
   }, [sessionId, projectDirName, agentId]);
+
+  // Incremental refresh (only new events)
+  const eventsRef = useRef<SessionEvent[]>([]);
+  eventsRef.current = events;
+
+  const loadNewEvents = useCallback(() => {
+    const currentEvents = eventsRef.current;
+    if (currentEvents.length === 0) return loadEvents();
+    const lastIndex = currentEvents[currentEvents.length - 1].index;
+    return invoke<SessionEvent[]>('get_session_events', {
+      sessionId, projectDirName, agentId: agentId || null, afterIndex: lastIndex,
+    })
+      .then((newEvents) => {
+        if (newEvents.length > 0) {
+          setEvents((prev) => [...prev, ...newEvents]);
+        }
+      })
+      .catch(console.error);
+  }, [sessionId, projectDirName, agentId, loadEvents]);
 
   useEffect(() => {
     if (!open) return;
@@ -381,24 +446,47 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
     setError(null);
     setSelectedIndex(null);
     setSearchQuery('');
+    setRawJsonCache(new Map());
+    setSelectedRawJson(null);
     loadEvents().finally(() => setIsLoading(false));
   }, [open, sessionId, projectDirName, loadEvents]);
 
-  // Live refresh (every 3 seconds for active sessions)
+  // Live refresh — incremental, every 3 seconds
   useEffect(() => {
     if (!open || !isLive) return;
-    const interval = setInterval(() => {
-      loadEvents();
-    }, 3000);
+    const interval = setInterval(loadNewEvents, 3000);
     return () => clearInterval(interval);
-  }, [open, isLive, loadEvents]);
+  }, [open, isLive, loadNewEvents]);
+
+  // Fetch rawJson on demand when needed
+  const fetchRawJson = useCallback(async (eventIndex: number) => {
+    const cached = rawJsonCache.get(eventIndex);
+    if (cached) { setSelectedRawJson(cached); return; }
+    try {
+      const json = await invoke<string>('get_event_raw_json', {
+        sessionId, projectDirName, eventIndex, agentId: agentId || null,
+      });
+      setRawJsonCache((prev) => new Map(prev).set(eventIndex, json));
+      setSelectedRawJson(json);
+    } catch (e) {
+      setSelectedRawJson(`Error loading raw JSON: ${e}`);
+    }
+  }, [rawJsonCache, sessionId, projectDirName, agentId]);
+
+  // Trigger rawJson fetch when needed
+  useEffect(() => {
+    if (selectedIndex === null) { setSelectedRawJson(null); return; }
+    const event = events.find((e) => e.index === selectedIndex);
+    const needsRaw = viewMode === 'raw' || !event?.contentPreview;
+    if (!needsRaw) { setSelectedRawJson(null); return; }
+    fetchRawJson(selectedIndex);
+  }, [selectedIndex, viewMode, events, fetchRawJson]);
 
   // Pre-compute search data + semantic types (once per load)
   const searchableEvents = useMemo(() =>
     events.map((e) => ({
       event: e,
       lowerPreview: e.contentPreview?.toLowerCase() ?? '',
-      lowerRaw: e.rawJson.toLowerCase(),
       semantic: detectSemanticType(e),
     })),
     [events]
@@ -428,7 +516,7 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
     // Search filter
     if (debouncedSearch.trim()) {
       const q = debouncedSearch.toLowerCase();
-      result = result.filter(({ lowerPreview, lowerRaw }) => lowerPreview.includes(q) || lowerRaw.includes(q));
+      result = result.filter(({ lowerPreview }) => lowerPreview.includes(q));
     }
     return result.map(({ event, semantic }) => ({ event, semantic })).reverse();
   }, [searchableEvents, filter, semanticFilter, debouncedSearch]);
@@ -464,27 +552,26 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
 
     setSelectedIndex(target.event.index);
 
-    // Scroll the event into view
+    // Scroll to target using virtual scroll positioning
     requestAnimationFrame(() => {
-      const el = eventListRef.current?.querySelector(`[data-event-index="${target.event.index}"]`);
-      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const el = virtualScroll.containerElRef.current;
+      if (el) {
+        el.scrollTop = target.pos * ROW_HEIGHT - el.clientHeight / 2 + ROW_HEIGHT / 2;
+      }
     });
   }, [filteredEvents, selectedIndex]);
 
   const selectedEvent = selectedIndex !== null ? events.find((e) => e.index === selectedIndex) : null;
+  const virtualScroll = useVirtualScroll(filteredEvents.length);
 
   const handleCopy = useCallback(() => {
     if (!selectedEvent) return;
     if (viewMode === 'raw') {
-      try {
-        navigator.clipboard.writeText(JSON.stringify(JSON.parse(selectedEvent.rawJson), null, 2));
-      } catch {
-        navigator.clipboard.writeText(selectedEvent.rawJson);
-      }
+      if (selectedRawJson) navigator.clipboard.writeText(selectedRawJson);
     } else {
-      navigator.clipboard.writeText(selectedEvent.contentPreview || selectedEvent.rawJson);
+      navigator.clipboard.writeText(selectedEvent.contentPreview || '');
     }
-  }, [selectedEvent, viewMode]);
+  }, [selectedEvent, viewMode, selectedRawJson]);
 
   // Semantic counts (from the role-filtered set, before semantic filter is applied)
   const semanticCounts = useMemo(() => {
@@ -669,8 +756,8 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
 
         {/* Content — resizable split (mr-2 keeps scrollbar away from dialog edge resize handle) */}
         <div ref={splitContainerRef} className="flex flex-1 overflow-hidden relative mx-2">
-          {/* Event list */}
-          <div ref={eventListRef} className="overflow-y-auto bg-black/20" style={{ width: splitPos }}>
+          {/* Event list (virtual scroll) */}
+          <div ref={virtualScroll.setContainerRef} className="overflow-y-auto bg-black/20" style={{ width: splitPos }}>
             {isLoading && (
               <div className="flex items-center justify-center py-12">
                 <span className="text-xs text-muted-foreground">Loading events...</span>
@@ -679,17 +766,31 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
             {error && (
               <div className="m-3 px-2 py-1.5 rounded bg-destructive/10 text-destructive text-xs">{error}</div>
             )}
-            {!isLoading && !error && filteredEvents.map(({ event, semantic }, i) => (
-              <EventRow
-                key={event.index}
-                event={event}
-                isSelected={selectedIndex === event.index}
-                onClick={() => setSelectedIndex(event.index)}
-                rowIndex={i}
-                searchQuery={debouncedSearch}
-                semanticType={semantic}
-              />
-            ))}
+            {!isLoading && !error && (
+              <div style={{ height: virtualScroll.totalHeight, position: 'relative' }}>
+                {filteredEvents.slice(virtualScroll.startIndex, virtualScroll.endIndex + 1).map(({ event, semantic }, i) => (
+                  <div
+                    key={event.index}
+                    style={{
+                      position: 'absolute',
+                      top: (virtualScroll.startIndex + i) * ROW_HEIGHT,
+                      left: 0,
+                      right: 0,
+                      height: ROW_HEIGHT,
+                    }}
+                  >
+                    <EventRow
+                      event={event}
+                      isSelected={selectedIndex === event.index}
+                      onClick={() => setSelectedIndex(event.index)}
+                      rowIndex={virtualScroll.startIndex + i}
+                      searchQuery={debouncedSearch}
+                      semanticType={semantic}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Split handle — z-30 to sit above dialog edge resize handles */}
@@ -702,7 +803,13 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
                 <span className="text-xs text-muted-foreground">Select an event to inspect</span>
               </div>
             ) : viewMode === 'raw' ? (
-              <PrettyJson json={selectedEvent.rawJson} query={debouncedSearch} />
+              selectedRawJson ? (
+                <PrettyJson json={selectedRawJson} query={debouncedSearch} />
+              ) : (
+                <div className="flex items-center justify-center py-8">
+                  <span className="text-xs text-muted-foreground">Loading raw JSON...</span>
+                </div>
+              )
             ) : (
               <div>
                 <div className="flex items-center gap-2 mb-3">
@@ -725,8 +832,12 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
                     )}
                     <Markdown>{prepareContentForPretty(selectedEvent.contentPreview)}</Markdown>
                   </div>
+                ) : selectedRawJson ? (
+                  <PrettyJson json={selectedRawJson} query={debouncedSearch} />
                 ) : (
-                  <PrettyJson json={selectedEvent.rawJson} query={debouncedSearch} />
+                  <div className="flex items-center justify-center py-8">
+                    <span className="text-xs text-muted-foreground">Loading...</span>
+                  </div>
                 )}
               </div>
             )}

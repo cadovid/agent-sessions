@@ -64,7 +64,27 @@ fn extract_cwd_from_jsonl(jsonl_path: &PathBuf) -> Option<String> {
 }
 
 /// Get GitHub URL from a project's git remote origin
+// Cache git remote URLs — they don't change during app lifetime
+static GIT_URL_CACHE: Lazy<Mutex<HashMap<String, Option<String>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
 fn get_github_url(project_path: &str) -> Option<String> {
+    // Check cache first
+    {
+        let cache = GIT_URL_CACHE.lock().unwrap();
+        if let Some(cached) = cache.get(project_path) {
+            return cached.clone();
+        }
+    }
+
+    let result = get_github_url_uncached(project_path);
+
+    // Cache the result (including None to avoid retrying failures)
+    GIT_URL_CACHE.lock().unwrap().insert(project_path.to_string(), result.clone());
+
+    result
+}
+
+fn get_github_url_uncached(project_path: &str) -> Option<String> {
     let output = Command::new("git")
         .args(["remote", "get-url", "origin"])
         .current_dir(project_path)
@@ -78,7 +98,6 @@ fn get_github_url(project_path: &str) -> Option<String> {
     let remote_url = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
     // Convert SSH format to HTTPS
-    // git@github.com:user/repo.git -> https://github.com/user/repo
     if remote_url.starts_with("git@github.com:") {
         let path = remote_url
             .strip_prefix("git@github.com:")?
@@ -88,7 +107,6 @@ fn get_github_url(project_path: &str) -> Option<String> {
     }
 
     // Already HTTPS format
-    // https://github.com/user/repo.git -> https://github.com/user/repo
     if remote_url.starts_with("https://github.com/") {
         let url = remote_url
             .strip_suffix(".git")
@@ -247,7 +265,15 @@ pub fn get_sessions_internal(processes: &[AgentProcess], agent_type: AgentType) 
         return sessions;
     }
 
-    // For each project directory
+    // Pre-filter: build a set of expected directory names from active process CWDs
+    let expected_dir_names: std::collections::HashSet<String> = processes.iter()
+        .filter_map(|p| p.cwd.as_ref())
+        .map(|cwd| convert_path_to_dir_name(&cwd.to_string_lossy()))
+        .collect();
+
+    debug!("Expected directory names from active processes: {:?}", expected_dir_names);
+
+    // For each project directory (only those matching active processes)
     if let Ok(entries) = fs::read_dir(&claude_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -258,6 +284,12 @@ pub fn get_sessions_internal(processes: &[AgentProcess], agent_type: AgentType) 
             let dir_name = path.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
+
+            // Skip directories that don't match any active process CWD
+            if !expected_dir_names.contains(dir_name) {
+                trace!("Skipping non-matching directory: {}", dir_name);
+                continue;
+            }
 
             // Get all recent JSONL files and extract cwd from each.
             // Multiple real paths can collide into the same encoded directory
@@ -470,8 +502,7 @@ pub fn parse_session_file(
     );
 
     // Parse the JSONL file to get session info
-    let file = File::open(jsonl_path).ok()?;
-    let reader = BufReader::new(file);
+    let mut file = File::open(jsonl_path).ok()?;
 
     let mut session_id = None;
     let mut git_branch = None;
@@ -487,10 +518,26 @@ pub fn parse_session_file(
     let mut found_status_info = false;
     let mut is_compacting = false;
 
+    // Tail-seek: for large files (>512KB), only read the last 512KB
+    use std::io::{Seek, SeekFrom};
+    let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let tail_seeking = file_size > 512 * 1024;
+    if tail_seeking {
+        let seek_pos = file_size.saturating_sub(512 * 1024);
+        let _ = file.seek(SeekFrom::Start(seek_pos));
+    }
+
+    let reader = BufReader::new(file);
+
     // Read last N lines for efficiency
     // Must be large enough to cover long stretches of progress entries during tool execution
     // (observed up to 275 consecutive non-content lines in real sessions)
-    let lines: Vec<_> = reader.lines().flatten().collect();
+    let mut lines_iter = reader.lines().flatten();
+    // If we tail-seeked, skip the first partial line
+    if tail_seeking {
+        let _ = lines_iter.next();
+    }
+    let lines: Vec<_> = lines_iter.collect();
     let recent_lines: Vec<_> = lines.iter().rev().take(500).collect();
 
     trace!("File has {} total lines, checking last {}", lines.len(), recent_lines.len());
