@@ -21,66 +21,115 @@ const EVENT_TYPE_CONFIG: Record<string, { label: string; color: string; accent: 
   assistant: { label: 'Assistant', color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30', accent: '#10b981' },
   tool_use: { label: 'Tool Call', color: 'bg-purple-500/20 text-purple-400 border-purple-500/30', accent: '#a855f7' },
   tool_result: { label: 'Tool Result', color: 'bg-amber-500/20 text-amber-400 border-amber-500/30', accent: '#f59e0b' },
+  thinking: { label: 'Thinking', color: 'bg-gray-500/15 text-gray-500 border-gray-500/20', accent: '#4b5563' },
   system: { label: 'System', color: 'bg-gray-500/20 text-gray-400 border-gray-500/30', accent: '#6b7280' },
   unknown: { label: 'Event', color: 'bg-gray-500/20 text-gray-400 border-gray-500/30', accent: '#6b7280' },
 };
 
 function getEventConfig(event: SessionEvent) {
-  if (event.role === 'user' || event.role === 'human') return EVENT_TYPE_CONFIG.human;
-  if (event.role === 'assistant') return EVENT_TYPE_CONFIG.assistant;
+  if (event.eventType === 'thinking') return EVENT_TYPE_CONFIG.thinking;
   if (event.eventType === 'tool_use') return EVENT_TYPE_CONFIG.tool_use;
   if (event.eventType === 'tool_result') return EVENT_TYPE_CONFIG.tool_result;
+  if (event.role === 'tool') return event.eventType === 'tool_result' ? EVENT_TYPE_CONFIG.tool_result : EVENT_TYPE_CONFIG.tool_use;
+  if (event.role === 'user' || event.role === 'human') return EVENT_TYPE_CONFIG.human;
+  if (event.role === 'assistant') return EVENT_TYPE_CONFIG.assistant;
   return EVENT_TYPE_CONFIG[event.eventType] ?? EVENT_TYPE_CONFIG.unknown;
 }
 
 function getEventTypeKey(event: SessionEvent): string {
+  if (event.eventType === 'thinking') return 'system';
+  if (event.eventType === 'tool_use' || event.eventType === 'tool_result' || event.role === 'tool') return 'tool';
   if (event.role === 'user' || event.role === 'human') return 'user';
   if (event.role === 'assistant') return 'assistant';
-  if (event.eventType === 'tool_use' || event.eventType === 'tool_result') return 'tool';
   return 'system';
 }
 
 type FilterType = 'all' | 'user' | 'assistant' | 'tool' | 'system';
-type SemanticType = 'none' | 'code' | 'plan' | 'diff';
+type SemanticType = 'none' | 'search' | 'edit' | 'execute' | 'plan' | 'diff' | 'web' | 'delegate';
 type ViewMode = 'timeline' | 'raw';
 
-const CODE_TOOLS = new Set(['Edit', 'Write', 'Bash', 'Read', 'Grep', 'Glob', 'Agent']);
-const DIFF_TOOLS = new Set(['Edit']);
+// Line-numbered source dump pattern (Claude Code's Read tool format: "42→ code", "42| code", "42: code", "42- code")
+const LINE_NUMBERED_SOURCE = /^\d+\s*(\u2192|\||:|-|  )\s/m;
 
-// Detect semantic type from raw JSON (tool name) and content preview
-function detectSemanticType(event: SessionEvent): SemanticType {
-  // Parse tool name from rawJson for tool_use events
-  if (event.eventType === 'tool_use' || event.eventType === 'tool_result') {
-    try {
-      const parsed = JSON.parse(event.rawJson);
-      const content = parsed?.message?.content;
-      if (Array.isArray(content)) {
-        for (const block of content) {
-          if (block.type === 'tool_use') {
-            const name = block.name ?? '';
-            if (DIFF_TOOLS.has(name)) return 'diff';
-            if (CODE_TOOLS.has(name)) return 'code';
-          }
-          if (block.type === 'tool_result') {
-            // Tool results inherit the type from what they respond to
-            return 'code';
-          }
-        }
-      }
-    } catch { /* ignore parse errors */ }
-    return 'code'; // tool events are code by default
+// Prepare content for Pretty rendering: wrap source-like content in code fences
+function prepareContentForPretty(text: string): string {
+  // Already has code fences — leave it alone
+  if (/^[ \t]*```/m.test(text)) return text;
+
+  const lines = text.split('\n');
+  if (lines.length < 3) return text;
+
+  // Detect unified diff content (diff --git, @@, ---/+++)
+  const hasGitHeader = /^diff --git /m.test(text);
+  const hasHunk = /^@@/m.test(text);
+  const hasPatchMinus = /^--- /m.test(text);
+  const hasPatchPlus = /^\+\+\+ /m.test(text);
+  if (hasGitHeader || (hasHunk && hasPatchMinus && hasPatchPlus)) {
+    return '```diff\n' + text + '\n```';
   }
 
-  // Detect plan in assistant text
-  if (event.role === 'assistant' && event.contentPreview) {
-    const text = event.contentPreview;
-    // Count plan indicators: markdown headers and numbered steps
-    let indicators = 0;
-    if (/^#{1,3}\s/m.test(text)) indicators++;
-    if (/^\d+\.\s/m.test(text)) indicators++;
-    if (/\*\*Step\s/i.test(text)) indicators++;
-    if (/## (Plan|Implementation|Changes|Summary)/i.test(text)) indicators += 2;
-    if (indicators >= 2) return 'plan';
+  // Check if most non-empty lines start with a number (line-numbered output)
+  const nonEmpty = lines.filter((l) => l.trim().length > 0);
+  const numbered = nonEmpty.filter((l) => /^\d+/.test(l.trim()));
+  if (numbered.length >= nonEmpty.length * 0.5) {
+    return '```text\n' + text + '\n```';
+  }
+  return text;
+}
+
+// Tool classification sets
+const SEARCH_TOOLS = new Set(['Read', 'Glob', 'Grep', 'LSP', 'ToolSearch']);
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'NotebookEdit']);
+const EXECUTE_TOOLS = new Set(['Bash', 'PowerShell']);
+const WEB_TOOLS = new Set(['WebFetch', 'WebSearch']);
+const DELEGATE_TOOLS = new Set(['Agent', 'SendMessage', 'TeamCreate', 'TeamDelete']);
+const PLAN_TOOLS = new Set(['EnterPlanMode', 'ExitPlanMode', 'AskUserQuestion']);
+
+// Detect semantic type (priority: Plan > Diff > tool-based classification > content-based)
+function detectSemanticType(event: SessionEvent): SemanticType {
+  const text = event.contentPreview ?? '';
+  const toolName = event.toolName ?? '';
+
+  // 1. Plan: <proposed_plan> tags in assistant text, or Plan Mode tools
+  if (event.role === 'assistant' && text.includes('<proposed_plan>')) {
+    return 'plan';
+  }
+  if (PLAN_TOOLS.has(toolName)) {
+    return 'plan';
+  }
+
+  // 2. Diff: structural unified diff markers OR ```diff code fences (in any event)
+  if (text) {
+    const hasDiffFence = /^[ \t]*```diff/m.test(text);
+    const hasGitHeader = /^diff --git /m.test(text);
+    const hasHunk = /^@@/m.test(text);
+    const hasPatchMinus = /^--- /m.test(text);
+    const hasPatchPlus = /^\+\+\+ /m.test(text);
+    const hasPatchFiles = hasPatchMinus && hasPatchPlus;
+
+    if (hasDiffFence || (hasGitHeader && (hasHunk || hasPatchFiles)) || (hasHunk && hasPatchFiles)) {
+      return 'diff';
+    }
+  }
+
+  // 3. Tool-name-based classification
+  if (toolName) {
+    if (SEARCH_TOOLS.has(toolName)) return 'search';
+    if (EDIT_TOOLS.has(toolName)) return 'edit';
+    if (EXECUTE_TOOLS.has(toolName)) return 'execute';
+    if (WEB_TOOLS.has(toolName)) return 'web';
+    if (DELEGATE_TOOLS.has(toolName)) return 'delegate';
+  }
+
+  // 4. Content-based: code fences in assistant text
+  if (event.role === 'assistant' && text && /^[ \t]*```/m.test(text)) {
+    return 'edit'; // assistant providing code = edit context
+  }
+
+  // 5. Tool results without toolName: check content patterns
+  if (event.eventType === 'tool_result' && text) {
+    if (LINE_NUMBERED_SOURCE.test(text)) return 'search';
+    if (text.includes('\n') && /^\d+/.test(text.trim())) return 'search';
   }
 
   return 'none';
@@ -135,9 +184,13 @@ function PrettyJson({ json, query }: { json: string; query?: string }) {
 }
 
 const SEMANTIC_BADGE: Record<string, { label: string; color: string } | null> = {
-  code: { label: 'Code', color: 'text-cyan-400/70' },
+  search: { label: 'Search', color: 'text-blue-400/70' },
+  edit: { label: 'Edit', color: 'text-cyan-400/70' },
+  execute: { label: 'Exec', color: 'text-yellow-400/70' },
   plan: { label: 'Plan', color: 'text-violet-400/70' },
   diff: { label: 'Diff', color: 'text-orange-400/70' },
+  web: { label: 'Web', color: 'text-pink-400/70' },
+  delegate: { label: 'Agent', color: 'text-teal-400/70' },
   none: null,
 };
 
@@ -201,6 +254,49 @@ function useDebouncedValue<T>(value: T, delay: number): T {
   return debounced;
 }
 
+// Virtual scroll for event list
+const ROW_HEIGHT = 52;
+const OVERSCAN = 10;
+
+function useVirtualScroll(itemCount: number) {
+  const [scrollTop, setScrollTop] = useState(0);
+  const [containerHeight, setContainerHeight] = useState(0);
+  const containerElRef = useRef<HTMLDivElement | null>(null);
+  const observerRef = useRef<ResizeObserver | null>(null);
+
+  // Callback ref: called when the DOM element mounts/unmounts
+  const setContainerRef = useCallback((el: HTMLDivElement | null) => {
+    // Cleanup previous
+    if (containerElRef.current) {
+      containerElRef.current.removeEventListener('scroll', handleScroll);
+      observerRef.current?.disconnect();
+    }
+
+    containerElRef.current = el;
+
+    if (el) {
+      el.addEventListener('scroll', handleScroll, { passive: true });
+      observerRef.current = new ResizeObserver((entries) => {
+        for (const entry of entries) setContainerHeight(entry.contentRect.height);
+      });
+      observerRef.current.observe(el);
+      setContainerHeight(el.clientHeight);
+      setScrollTop(el.scrollTop);
+    }
+
+    function handleScroll() {
+      if (containerElRef.current) setScrollTop(containerElRef.current.scrollTop);
+    }
+  }, []);
+
+  const totalHeight = itemCount * ROW_HEIGHT;
+  const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN);
+  const visibleCount = Math.ceil(containerHeight / ROW_HEIGHT) + 2 * OVERSCAN;
+  const endIndex = Math.min(itemCount - 1, startIndex + visibleCount);
+
+  return { totalHeight, startIndex, endIndex, setContainerRef, containerElRef };
+}
+
 export function EventInspector({ open, onClose, sessionId, projectDirName, sessionLabel, accentColor, isLive, agentId }: EventInspectorProps) {
   const [events, setEvents] = useState<SessionEvent[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -211,6 +307,10 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
   const [viewMode, setViewMode] = useState<ViewMode>('timeline');
   const [searchQuery, setSearchQuery] = useState('');
   const debouncedSearch = useDebouncedValue(searchQuery, 200);
+
+  // Lazy rawJson loading
+  const [rawJsonCache, setRawJsonCache] = useState<Map<number, string>>(new Map());
+  const [selectedRawJson, setSelectedRawJson] = useState<string | null>(null);
 
   // Dialog position + size
   const [dialogSize, setDialogSize] = useState({ width: 900, height: 600 });
@@ -225,8 +325,7 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
   const [isResizingSplit, setIsResizingSplit] = useState(false);
   const splitContainerRef = useRef<HTMLDivElement>(null);
 
-  // Event list scroll ref for navigation
-  const eventListRef = useRef<HTMLDivElement>(null);
+  // Virtual scroll removes the need for a separate eventListRef
 
   // Reset position when opening
   useEffect(() => {
@@ -315,12 +414,31 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
     return () => { document.removeEventListener('mousemove', handleMove); document.removeEventListener('mouseup', handleUp); document.body.style.userSelect = ''; document.body.style.cursor = ''; };
   }, [isResizingSplit]);
 
-  // Load events
+  // Load events (initial full load)
   const loadEvents = useCallback(() => {
-    return invoke<SessionEvent[]>('get_session_events', { sessionId, projectDirName, agentId: agentId || null })
+    return invoke<SessionEvent[]>('get_session_events', { sessionId, projectDirName, agentId: agentId || null, afterIndex: null })
       .then(setEvents)
       .catch((e) => setError(String(e)));
   }, [sessionId, projectDirName, agentId]);
+
+  // Incremental refresh (only new events)
+  const eventsRef = useRef<SessionEvent[]>([]);
+  eventsRef.current = events;
+
+  const loadNewEvents = useCallback(() => {
+    const currentEvents = eventsRef.current;
+    if (currentEvents.length === 0) return loadEvents();
+    const lastIndex = currentEvents[currentEvents.length - 1].index;
+    return invoke<SessionEvent[]>('get_session_events', {
+      sessionId, projectDirName, agentId: agentId || null, afterIndex: lastIndex,
+    })
+      .then((newEvents) => {
+        if (newEvents.length > 0) {
+          setEvents((prev) => [...prev, ...newEvents]);
+        }
+      })
+      .catch(console.error);
+  }, [sessionId, projectDirName, agentId, loadEvents]);
 
   useEffect(() => {
     if (!open) return;
@@ -328,24 +446,47 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
     setError(null);
     setSelectedIndex(null);
     setSearchQuery('');
+    setRawJsonCache(new Map());
+    setSelectedRawJson(null);
     loadEvents().finally(() => setIsLoading(false));
   }, [open, sessionId, projectDirName, loadEvents]);
 
-  // Live refresh (every 3 seconds for active sessions)
+  // Live refresh — incremental, every 3 seconds
   useEffect(() => {
     if (!open || !isLive) return;
-    const interval = setInterval(() => {
-      loadEvents();
-    }, 3000);
+    const interval = setInterval(loadNewEvents, 3000);
     return () => clearInterval(interval);
-  }, [open, isLive, loadEvents]);
+  }, [open, isLive, loadNewEvents]);
+
+  // Fetch rawJson on demand when needed
+  const fetchRawJson = useCallback(async (eventIndex: number) => {
+    const cached = rawJsonCache.get(eventIndex);
+    if (cached) { setSelectedRawJson(cached); return; }
+    try {
+      const json = await invoke<string>('get_event_raw_json', {
+        sessionId, projectDirName, eventIndex, agentId: agentId || null,
+      });
+      setRawJsonCache((prev) => new Map(prev).set(eventIndex, json));
+      setSelectedRawJson(json);
+    } catch (e) {
+      setSelectedRawJson(`Error loading raw JSON: ${e}`);
+    }
+  }, [rawJsonCache, sessionId, projectDirName, agentId]);
+
+  // Trigger rawJson fetch when needed
+  useEffect(() => {
+    if (selectedIndex === null) { setSelectedRawJson(null); return; }
+    const event = events.find((e) => e.index === selectedIndex);
+    const needsRaw = viewMode === 'raw' || !event?.contentPreview;
+    if (!needsRaw) { setSelectedRawJson(null); return; }
+    fetchRawJson(selectedIndex);
+  }, [selectedIndex, viewMode, events, fetchRawJson]);
 
   // Pre-compute search data + semantic types (once per load)
   const searchableEvents = useMemo(() =>
     events.map((e) => ({
       event: e,
       lowerPreview: e.contentPreview?.toLowerCase() ?? '',
-      lowerRaw: e.rawJson.toLowerCase(),
       semantic: detectSemanticType(e),
     })),
     [events]
@@ -353,14 +494,17 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
 
   const filteredEvents = useMemo(() => {
     let result = searchableEvents;
-    // Role filter
-    if (filter !== 'all') {
+    // Hide thinking events by default (they have no useful content)
+    if (filter === 'all') {
+      result = result.filter(({ event: e }) => e.eventType !== 'thinking');
+    } else {
       result = result.filter(({ event: e }) => {
+        const typeKey = getEventTypeKey(e);
         switch (filter) {
-          case 'user': return e.role === 'user' || e.role === 'human';
-          case 'assistant': return e.role === 'assistant';
-          case 'tool': return e.eventType === 'tool_use' || e.eventType === 'tool_result';
-          case 'system': return !e.role && e.eventType !== 'tool_use' && e.eventType !== 'tool_result';
+          case 'user': return typeKey === 'user';
+          case 'assistant': return typeKey === 'assistant';
+          case 'tool': return typeKey === 'tool';
+          case 'system': return typeKey === 'system'; // includes thinking
           default: return true;
         }
       });
@@ -372,7 +516,7 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
     // Search filter
     if (debouncedSearch.trim()) {
       const q = debouncedSearch.toLowerCase();
-      result = result.filter(({ lowerPreview, lowerRaw }) => lowerPreview.includes(q) || lowerRaw.includes(q));
+      result = result.filter(({ lowerPreview }) => lowerPreview.includes(q));
     }
     return result.map(({ event, semantic }) => ({ event, semantic })).reverse();
   }, [searchableEvents, filter, semanticFilter, debouncedSearch]);
@@ -408,43 +552,38 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
 
     setSelectedIndex(target.event.index);
 
-    // Scroll the event into view
+    // Scroll to target using virtual scroll positioning
     requestAnimationFrame(() => {
-      const el = eventListRef.current?.querySelector(`[data-event-index="${target.event.index}"]`);
-      el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      const el = virtualScroll.containerElRef.current;
+      if (el) {
+        el.scrollTop = target.pos * ROW_HEIGHT - el.clientHeight / 2 + ROW_HEIGHT / 2;
+      }
     });
   }, [filteredEvents, selectedIndex]);
 
   const selectedEvent = selectedIndex !== null ? events.find((e) => e.index === selectedIndex) : null;
+  const virtualScroll = useVirtualScroll(filteredEvents.length);
 
   const handleCopy = useCallback(() => {
     if (!selectedEvent) return;
     if (viewMode === 'raw') {
-      try {
-        navigator.clipboard.writeText(JSON.stringify(JSON.parse(selectedEvent.rawJson), null, 2));
-      } catch {
-        navigator.clipboard.writeText(selectedEvent.rawJson);
-      }
+      if (selectedRawJson) navigator.clipboard.writeText(selectedRawJson);
     } else {
-      navigator.clipboard.writeText(selectedEvent.contentPreview || selectedEvent.rawJson);
+      navigator.clipboard.writeText(selectedEvent.contentPreview || '');
     }
-  }, [selectedEvent, viewMode]);
+  }, [selectedEvent, viewMode, selectedRawJson]);
 
   // Semantic counts (from the role-filtered set, before semantic filter is applied)
   const semanticCounts = useMemo(() => {
-    const counts = { code: 0, plan: 0, diff: 0 };
+    const counts: Record<string, number> = { search: 0, edit: 0, execute: 0, plan: 0, diff: 0, web: 0, delegate: 0 };
     for (const { event: e, semantic } of searchableEvents) {
-      // Apply role filter only (not semantic filter) to count semantic types
       if (filter !== 'all') {
-        const role = e.role;
-        const pass = filter === 'user' ? (role === 'user' || role === 'human')
-          : filter === 'assistant' ? role === 'assistant'
-          : filter === 'tool' ? (e.eventType === 'tool_use' || e.eventType === 'tool_result')
-          : filter === 'system' ? (!role && e.eventType !== 'tool_use' && e.eventType !== 'tool_result')
-          : true;
-        if (!pass) continue;
+        const typeKey = getEventTypeKey(e);
+        if (typeKey !== filter) continue;
+      } else if (e.eventType === 'thinking') {
+        continue;
       }
-      if (semantic !== 'none') counts[semantic]++;
+      if (semantic !== 'none' && semantic in counts) counts[semantic]++;
     }
     return counts;
   }, [searchableEvents, filter]);
@@ -459,9 +598,13 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
 
   const semanticFilters: { key: SemanticType | 'all'; label: string; count: number; accent: string }[] = [
     { key: 'all', label: 'Any', count: 0, accent: '' },
-    { key: 'code', label: 'Code', count: semanticCounts.code, accent: '#06b6d4' },
+    { key: 'search', label: 'Search', count: semanticCounts.search, accent: '#3b82f6' },
+    { key: 'edit', label: 'Edit', count: semanticCounts.edit, accent: '#06b6d4' },
+    { key: 'execute', label: 'Exec', count: semanticCounts.execute, accent: '#eab308' },
     { key: 'plan', label: 'Plan', count: semanticCounts.plan, accent: '#8b5cf6' },
     { key: 'diff', label: 'Diff', count: semanticCounts.diff, accent: '#f97316' },
+    { key: 'web', label: 'Web', count: semanticCounts.web, accent: '#ec4899' },
+    { key: 'delegate', label: 'Agent', count: semanticCounts.delegate, accent: '#14b8a6' },
   ];
 
   const navPills: { key: string; label: string; count: number; accent: string }[] = [
@@ -485,15 +628,15 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
         className={`${dialogPos ? '' : 'relative'} bg-popover border border-border rounded-lg shadow-2xl flex flex-col overflow-hidden z-50`}
         style={dialogStyle}
       >
-        {/* Resize handles */}
-        <div onMouseDown={(e) => handleDialogResizeStart(e, 'e')} className="absolute top-0 right-0 w-1.5 h-full cursor-ew-resize z-50" />
-        <div onMouseDown={(e) => handleDialogResizeStart(e, 'w')} className="absolute top-0 left-0 w-1.5 h-full cursor-ew-resize z-50" />
-        <div onMouseDown={(e) => handleDialogResizeStart(e, 's')} className="absolute bottom-0 left-0 h-1.5 w-full cursor-ns-resize z-50" />
-        <div onMouseDown={(e) => handleDialogResizeStart(e, 'n')} className="absolute top-0 left-0 h-1.5 w-full cursor-ns-resize z-50" />
-        <div onMouseDown={(e) => handleDialogResizeStart(e, 'se')} className="absolute bottom-0 right-0 w-4 h-4 cursor-nwse-resize z-50" />
-        <div onMouseDown={(e) => handleDialogResizeStart(e, 'sw')} className="absolute bottom-0 left-0 w-4 h-4 cursor-nesw-resize z-50" />
-        <div onMouseDown={(e) => handleDialogResizeStart(e, 'ne')} className="absolute top-0 right-0 w-4 h-4 cursor-nesw-resize z-50" />
-        <div onMouseDown={(e) => handleDialogResizeStart(e, 'nw')} className="absolute top-0 left-0 w-4 h-4 cursor-nwse-resize z-50" />
+        {/* Resize handles — z-10 so they don't overlap the split pane handle */}
+        <div onMouseDown={(e) => handleDialogResizeStart(e, 'e')} className="absolute top-0 right-0 w-1.5 h-full cursor-ew-resize z-10" />
+        <div onMouseDown={(e) => handleDialogResizeStart(e, 'w')} className="absolute top-0 left-0 w-1.5 h-full cursor-ew-resize z-10" />
+        <div onMouseDown={(e) => handleDialogResizeStart(e, 's')} className="absolute bottom-0 left-0 h-1.5 w-full cursor-ns-resize z-10" />
+        <div onMouseDown={(e) => handleDialogResizeStart(e, 'n')} className="absolute top-0 left-0 h-1.5 w-full cursor-ns-resize z-10" />
+        <div onMouseDown={(e) => handleDialogResizeStart(e, 'se')} className="absolute bottom-0 right-0 w-4 h-4 cursor-nwse-resize z-20" />
+        <div onMouseDown={(e) => handleDialogResizeStart(e, 'sw')} className="absolute bottom-0 left-0 w-4 h-4 cursor-nesw-resize z-20" />
+        <div onMouseDown={(e) => handleDialogResizeStart(e, 'ne')} className="absolute top-0 right-0 w-4 h-4 cursor-nesw-resize z-20" />
+        <div onMouseDown={(e) => handleDialogResizeStart(e, 'nw')} className="absolute top-0 left-0 w-4 h-4 cursor-nwse-resize z-20" />
 
         {/* Header */}
         <div
@@ -611,10 +754,10 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
           ))}
         </div>
 
-        {/* Content — resizable split */}
-        <div ref={splitContainerRef} className="flex flex-1 overflow-hidden relative">
-          {/* Event list */}
-          <div ref={eventListRef} className="overflow-y-auto bg-black/20" style={{ width: splitPos }}>
+        {/* Content — resizable split (mr-2 keeps scrollbar away from dialog edge resize handle) */}
+        <div ref={splitContainerRef} className="flex flex-1 overflow-hidden relative mx-2">
+          {/* Event list (virtual scroll) */}
+          <div ref={virtualScroll.setContainerRef} className="overflow-y-auto bg-black/20" style={{ width: splitPos }}>
             {isLoading && (
               <div className="flex items-center justify-center py-12">
                 <span className="text-xs text-muted-foreground">Loading events...</span>
@@ -623,21 +766,35 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
             {error && (
               <div className="m-3 px-2 py-1.5 rounded bg-destructive/10 text-destructive text-xs">{error}</div>
             )}
-            {!isLoading && !error && filteredEvents.map(({ event, semantic }, i) => (
-              <EventRow
-                key={event.index}
-                event={event}
-                isSelected={selectedIndex === event.index}
-                onClick={() => setSelectedIndex(event.index)}
-                rowIndex={i}
-                searchQuery={debouncedSearch}
-                semanticType={semantic}
-              />
-            ))}
+            {!isLoading && !error && (
+              <div style={{ height: virtualScroll.totalHeight, position: 'relative' }}>
+                {filteredEvents.slice(virtualScroll.startIndex, virtualScroll.endIndex + 1).map(({ event, semantic }, i) => (
+                  <div
+                    key={event.index}
+                    style={{
+                      position: 'absolute',
+                      top: (virtualScroll.startIndex + i) * ROW_HEIGHT,
+                      left: 0,
+                      right: 0,
+                      height: ROW_HEIGHT,
+                    }}
+                  >
+                    <EventRow
+                      event={event}
+                      isSelected={selectedIndex === event.index}
+                      onClick={() => setSelectedIndex(event.index)}
+                      rowIndex={virtualScroll.startIndex + i}
+                      searchQuery={debouncedSearch}
+                      semanticType={semantic}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
-          {/* Split handle */}
-          <div onMouseDown={handleSplitStart} className="w-1 shrink-0 cursor-col-resize hover:bg-ring/50 active:bg-ring/70 transition-colors" />
+          {/* Split handle — z-30 to sit above dialog edge resize handles */}
+          <div onMouseDown={handleSplitStart} className="w-1.5 shrink-0 cursor-col-resize hover:bg-ring/50 active:bg-ring/70 transition-colors z-30 relative" />
 
           {/* Detail panel */}
           <div className="flex-1 overflow-y-auto p-4">
@@ -646,7 +803,13 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
                 <span className="text-xs text-muted-foreground">Select an event to inspect</span>
               </div>
             ) : viewMode === 'raw' ? (
-              <PrettyJson json={selectedEvent.rawJson} query={debouncedSearch} />
+              selectedRawJson ? (
+                <PrettyJson json={selectedRawJson} query={debouncedSearch} />
+              ) : (
+                <div className="flex items-center justify-center py-8">
+                  <span className="text-xs text-muted-foreground">Loading raw JSON...</span>
+                </div>
+              )
             ) : (
               <div>
                 <div className="flex items-center gap-2 mb-3">
@@ -667,10 +830,14 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
                         <HighlightText text={selectedEvent.contentPreview} query={debouncedSearch} />
                       </div>
                     )}
-                    <Markdown>{selectedEvent.contentPreview}</Markdown>
+                    <Markdown>{prepareContentForPretty(selectedEvent.contentPreview)}</Markdown>
                   </div>
+                ) : selectedRawJson ? (
+                  <PrettyJson json={selectedRawJson} query={debouncedSearch} />
                 ) : (
-                  <PrettyJson json={selectedEvent.rawJson} query={debouncedSearch} />
+                  <div className="flex items-center justify-center py-8">
+                    <span className="text-xs text-muted-foreground">Loading...</span>
+                  </div>
                 )}
               </div>
             )}
@@ -682,3 +849,5 @@ export function EventInspector({ open, onClose, sessionId, projectDirName, sessi
 
   return createPortal(panel, document.body);
 }
+
+export default EventInspector;

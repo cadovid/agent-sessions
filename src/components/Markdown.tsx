@@ -41,7 +41,31 @@ export function Markdown({ children, className }: MarkdownProps) {
           h2: ({ children }) => <h2 className="font-bold text-[1.05em] mb-1">{children}</h2>,
           h3: ({ children }) => <h3 className="font-semibold mb-0.5">{children}</h3>,
           code: ({ className, children, ...props }) => {
-            const isBlock = className?.includes('language-');
+            const hasNewlines = typeof children === 'string' && children.includes('\n');
+            const isBlock = className?.includes('language-') || hasNewlines;
+            const isDiff = className?.includes('language-diff');
+
+            if (isBlock && isDiff && typeof children === 'string') {
+              // Render diff with colored lines
+              const lines = children.split('\n');
+              return (
+                <pre className="bg-muted/50 rounded px-2 py-1.5 my-1 overflow-x-auto text-[0.85em]">
+                  <code>
+                    {lines.map((line, i) => {
+                      let lineClass = '';
+                      if (line.startsWith('+ ') || line.startsWith('+\t')) lineClass = 'text-emerald-400 bg-emerald-400/10';
+                      else if (line.startsWith('- ') || line.startsWith('-\t')) lineClass = 'text-red-400 bg-red-400/10';
+                      else if (line.startsWith('@@')) lineClass = 'text-blue-400';
+                      else if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('--- ') || line.startsWith('+++ ')) lineClass = 'text-muted-foreground';
+                      return lineClass
+                        ? <div key={i} className={lineClass}>{line}</div>
+                        : <span key={i}>{line}{i < lines.length - 1 ? '\n' : ''}</span>;
+                    })}
+                  </code>
+                </pre>
+              );
+            }
+
             if (isBlock) {
               return (
                 <pre className="bg-muted/50 rounded px-2 py-1.5 my-1 overflow-x-auto text-[0.85em]">

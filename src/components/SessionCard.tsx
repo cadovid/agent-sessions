@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, memo, lazy, Suspense } from 'react';
 import { Session } from '../types/session';
 import { Markdown } from './Markdown';
-import { EventInspector } from './EventInspector';
+const EventInspector = lazy(() => import('./EventInspector'));
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -95,7 +95,7 @@ function setCustomUrl(sessionId: string, url: string) {
   localStorage.setItem(CUSTOM_URLS_KEY, JSON.stringify(urls));
 }
 
-function MessagePreviewBlock({ message }: { message: string | null }) {
+const MessagePreviewBlock = memo(function MessagePreviewBlock({ message }: { message: string | null }) {
   const [expanded, setExpanded] = useState(false);
 
   const handleToggle = useCallback((e: React.MouseEvent) => {
@@ -120,7 +120,7 @@ function MessagePreviewBlock({ message }: { message: string | null }) {
       )}
     </div>
   );
-}
+});
 
 export function SessionCard({ session, onClick }: SessionCardProps) {
   const config = statusConfig[session.status];
@@ -457,15 +457,19 @@ export function SessionCard({ session, onClick }: SessionCardProps) {
         </DialogContent>
       </Dialog>
 
-      {/* Event Inspector */}
-      <EventInspector
-        open={isInspectorOpen}
-        onClose={() => setIsInspectorOpen(false)}
-        sessionId={session.id}
-        projectDirName=""
-        sessionLabel={displayName}
-        isLive
-      />
+      {/* Event Inspector (lazy loaded) */}
+      {isInspectorOpen && (
+        <Suspense fallback={null}>
+          <EventInspector
+            open={isInspectorOpen}
+            onClose={() => setIsInspectorOpen(false)}
+            sessionId={session.id}
+            projectDirName=""
+            sessionLabel={displayName}
+            isLive
+          />
+        </Suspense>
+      )}
     </>
   );
 }

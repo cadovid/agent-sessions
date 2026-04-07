@@ -82,6 +82,7 @@ export function useSessions() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const sessionsRef = useRef<Session[]>([]);
+  const prevTrayJson = useRef<string>('');
 
   const updateTrayTitle = useCallback(async (total: number, waiting: number) => {
     try {
@@ -117,7 +118,11 @@ export function useSessions() {
         projectName: customNames[s.id] || s.projectName,
         status: ['processing', 'thinking', 'compacting'].includes(s.status) ? 'active' : 'idle',
       }));
-      await invoke('update_tray_menu', { sessions: trayItems }).catch(console.error);
+      const trayJson = JSON.stringify(trayItems);
+      if (trayJson !== prevTrayJson.current) {
+        prevTrayJson.current = trayJson;
+        await invoke('update_tray_menu', { sessions: trayItems }).catch(console.error);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch sessions');
     } finally {

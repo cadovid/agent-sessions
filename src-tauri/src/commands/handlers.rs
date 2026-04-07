@@ -189,8 +189,14 @@ pub fn update_tray_menu(app: tauri::AppHandle, sessions: Vec<TraySessionInfo>) -
 
 /// Get all events from a session JSONL file for the Event Inspector
 #[tauri::command]
-pub fn get_session_events(session_id: String, project_dir_name: String, agent_id: Option<String>) -> Result<Vec<history::SessionEvent>, String> {
-    history::get_session_events(&session_id, &project_dir_name, &agent_id.unwrap_or_default())
+pub fn get_session_events(session_id: String, project_dir_name: String, agent_id: Option<String>, after_index: Option<usize>) -> Result<Vec<history::SessionEvent>, String> {
+    history::get_session_events(&session_id, &project_dir_name, &agent_id.unwrap_or_default(), after_index)
+}
+
+/// Get the raw JSON for a single event by index
+#[tauri::command]
+pub fn get_event_raw_json(session_id: String, project_dir_name: String, event_index: usize, agent_id: Option<String>) -> Result<String, String> {
+    history::get_event_raw_json(&session_id, &project_dir_name, event_index, &agent_id.unwrap_or_default())
 }
 
 /// Archive a session by copying it to a safe location

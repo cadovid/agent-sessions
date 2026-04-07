@@ -84,32 +84,6 @@ fn extract_text_content(value: &serde_json::Value) -> Option<String> {
 }
 
 /// Read the last `n` lines from a file by seeking to end - 64KB.
-fn read_last_lines(path: &PathBuf, n: usize) -> Vec<String> {
-    let mut file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Vec::new(),
-    };
-
-    let file_len = match file.seek(SeekFrom::End(0)) {
-        Ok(len) => len,
-        Err(_) => return Vec::new(),
-    };
-
-    // Seek back up to 256KB from end (enough for ~500 lines)
-    let seek_pos = file_len.saturating_sub(262144);
-    if file.seek(SeekFrom::Start(seek_pos)).is_err() {
-        return Vec::new();
-    }
-
-    let mut buf = String::new();
-    if file.read_to_string(&mut buf).is_err() {
-        return Vec::new();
-    }
-
-    let lines: Vec<String> = buf.lines().map(String::from).collect();
-    lines.into_iter().rev().take(n).collect()
-}
-
 /// Read the first `n` lines from a file.
 fn read_first_lines(path: &PathBuf, n: usize) -> Vec<String> {
     let file = match File::open(path) {
@@ -118,6 +92,35 @@ fn read_first_lines(path: &PathBuf, n: usize) -> Vec<String> {
     };
     let reader = BufReader::new(file);
     reader.lines().take(n).flatten().collect()
+}
+
+/// Read both head and tail of a file in a single open.
+fn read_head_and_tail(path: &PathBuf, head_n: usize, tail_n: usize) -> (Vec<String>, Vec<String>) {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(_) => return (Vec::new(), Vec::new()),
+    };
+
+    // Read head
+    let reader = BufReader::new(&file);
+    let head: Vec<String> = reader.lines().take(head_n).flatten().collect();
+
+    // Seek to tail (1MB buffer — large sessions can have many tool/progress events between text messages)
+    let file_len = match file.seek(SeekFrom::End(0)) {
+        Ok(len) => len,
+        Err(_) => return (head, Vec::new()),
+    };
+    let seek_pos = file_len.saturating_sub(1024 * 1024);
+    if file.seek(SeekFrom::Start(seek_pos)).is_err() {
+        return (head, Vec::new());
+    }
+    let mut buf = String::new();
+    if file.read_to_string(&mut buf).is_err() {
+        return (head, Vec::new());
+    }
+    let tail: Vec<String> = buf.lines().map(String::from).rev().take(tail_n).collect();
+
+    (head, tail)
 }
 
 /// Scan the subagents directory for a session and return info about each subagent.
@@ -228,8 +231,8 @@ fn parse_history_session(jsonl_path: &PathBuf) -> Option<HistorySession> {
         .and_then(|s| s.to_str())
         .map(String::from)?;
 
-    // Read last ~500 lines to find timestamp, git_branch, and up to 20 recent messages
-    let last_lines = read_last_lines(jsonl_path, 500);
+    // Read head (first 20 lines for cwd) and tail (last 500 for messages) in a single file open
+    let (first_lines, last_lines) = read_head_and_tail(jsonl_path, 20, 500);
 
     let mut last_activity_at: Option<String> = None;
     let mut git_branch: Option<String> = None;
@@ -243,7 +246,6 @@ fn parse_history_session(jsonl_path: &PathBuf) -> Option<HistorySession> {
             if git_branch.is_none() {
                 git_branch = msg.git_branch.clone();
             }
-            // Collect up to 20 meaningful messages (most recent first)
             if recent_messages.len() < 20 {
                 if let Some(content) = &msg.message {
                     if let Some(c) = &content.content {
@@ -256,9 +258,6 @@ fn parse_history_session(jsonl_path: &PathBuf) -> Option<HistorySession> {
             }
         }
     }
-
-    // Read first ~20 lines to extract cwd
-    let first_lines = read_first_lines(jsonl_path, 20);
     let mut cwd: Option<String> = None;
     for line in &first_lines {
         if let Ok(msg) = serde_json::from_str::<JsonlMessage>(line) {
@@ -507,18 +506,223 @@ pub struct SessionEvent {
     pub timestamp: Option<String>,
     pub event_type: String,
     pub role: Option<String>,
+    pub tool_name: Option<String>,
     pub content_preview: Option<String>,
-    pub raw_json: String,
+}
+
+/// Build a human-readable preview for a tool_use event from its name and input.
+fn build_tool_preview(name: &str, input: &serde_json::Value) -> String {
+    match name {
+        "Agent" | "SendMessage" => {
+            let mut parts = vec![format!("**{}**", name)];
+            if let Some(desc) = input.get("description").and_then(|d| d.as_str()) {
+                parts.push(format!("**Description:** {}", desc));
+            }
+            if let Some(st) = input.get("subagent_type").and_then(|s| s.as_str()) {
+                parts.push(format!("**Type:** {}", st));
+            }
+            if let Some(prompt) = input.get("prompt").and_then(|p| p.as_str()) {
+                parts.push(format!("**Prompt:**\n\n```text\n{}\n```", prompt));
+            }
+            // SendMessage
+            if let Some(to) = input.get("to").and_then(|t| t.as_str()) {
+                parts.push(format!("**To:** {}", to));
+            }
+            if let Some(msg) = input.get("message").and_then(|m| m.as_str()) {
+                parts.push(format!("**Message:**\n\n```text\n{}\n```", msg));
+            }
+            parts.join("\n\n")
+        }
+        "Edit" => {
+            let file = input.get("file_path").and_then(|f| f.as_str()).unwrap_or("unknown");
+            let mut parts = vec![format!("**Edit:** `{}`", file)];
+            // Build a unified diff from old_string -> new_string
+            let old = input.get("old_string").and_then(|s| s.as_str()).unwrap_or("");
+            let new = input.get("new_string").and_then(|s| s.as_str()).unwrap_or("");
+            if !old.is_empty() || !new.is_empty() {
+                let mut diff_lines = vec!["```diff".to_string()];
+                for line in old.lines() {
+                    diff_lines.push(format!("- {}", line));
+                }
+                for line in new.lines() {
+                    diff_lines.push(format!("+ {}", line));
+                }
+                diff_lines.push("```".to_string());
+                parts.push(diff_lines.join("\n"));
+            }
+            parts.join("\n\n")
+        }
+        "Write" => {
+            let file = input.get("file_path").and_then(|f| f.as_str()).unwrap_or("unknown");
+            let content = input.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            let preview: String = content.chars().take(2000).collect();
+            format!("**Write:** `{}`\n\n```\n{}\n```", file, preview)
+        }
+        "Bash" | "PowerShell" => {
+            let cmd = input.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            format!("```bash\n{}\n```", cmd)
+        }
+        "Read" => {
+            let file = input.get("file_path").and_then(|f| f.as_str()).unwrap_or("unknown");
+            let mut s = format!("**Read:** `{}`", file);
+            if let Some(offset) = input.get("offset").and_then(|o| o.as_u64()) {
+                s.push_str(&format!(" (offset: {})", offset));
+            }
+            if let Some(limit) = input.get("limit").and_then(|l| l.as_u64()) {
+                s.push_str(&format!(" (limit: {})", limit));
+            }
+            s
+        }
+        "Glob" => {
+            let pattern = input.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
+            format!("**Glob:** `{}`", pattern)
+        }
+        "Grep" => {
+            let pattern = input.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
+            let path = input.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            if path.is_empty() {
+                format!("**Grep:** `{}`", pattern)
+            } else {
+                format!("**Grep:** `{}` in `{}`", pattern, path)
+            }
+        }
+        "WebFetch" => {
+            let url = input.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            format!("**WebFetch:** {}", url)
+        }
+        "WebSearch" => {
+            let query = input.get("query").and_then(|q| q.as_str()).unwrap_or("");
+            format!("**WebSearch:** {}", query)
+        }
+        _ => {
+            // Generic: show tool name + file_path or pattern if present
+            if let Some(fp) = input.get("file_path").and_then(|f| f.as_str()) {
+                format!("{}: {}", name, fp)
+            } else if let Some(p) = input.get("pattern").and_then(|p| p.as_str()) {
+                format!("{}: {}", name, p)
+            } else {
+                name.to_string()
+            }
+        }
+    }
+}
+
+/// Detect the actual content type from message.content blocks.
+/// Returns (effective_event_type, effective_role, tool_name, content_preview).
+fn classify_message_content(parsed: &serde_json::Value) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+    let message = match parsed.get("message") {
+        Some(m) => m,
+        None => return (None, None, None, None),
+    };
+
+    let role = message.get("role").and_then(|r| r.as_str()).map(String::from);
+    let content = match message.get("content") {
+        Some(c) => c,
+        None => return (None, role, None, None),
+    };
+
+    // If content is an array, inspect the block types
+    if let Some(arr) = content.as_array() {
+        let mut has_tool_use = false;
+        let mut has_tool_result = false;
+        let mut has_thinking_only = true;
+        let mut has_text = false;
+        let mut detected_tool_name: Option<String> = None;
+        let mut tool_input_preview: Option<String> = None;
+        let mut tool_result_content: Option<String> = None;
+        let mut text_content: Option<String> = None;
+
+        for block in arr {
+            let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match block_type {
+                "tool_use" => {
+                    has_tool_use = true;
+                    has_thinking_only = false;
+                    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("Tool");
+                    detected_tool_name = Some(name.to_string());
+                    // Build preview from tool input
+                    if let Some(input) = block.get("input") {
+                        tool_input_preview = Some(build_tool_preview(name, input));
+                    } else {
+                        tool_input_preview = Some(name.to_string());
+                    }
+                }
+                "tool_result" => {
+                    has_tool_result = true;
+                    has_thinking_only = false;
+                    // Extract content from tool_result block (no truncation — inspector shows full content)
+                    if let Some(c) = block.get("content") {
+                        if let Some(s) = c.as_str() {
+                            tool_result_content = Some(s.to_string());
+                        } else if let Some(arr) = c.as_array() {
+                            for item in arr {
+                                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                    if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                                        tool_result_content = Some(t.to_string());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                "thinking" => {
+                    // thinking blocks — no useful content
+                }
+                "text" => {
+                    has_text = true;
+                    has_thinking_only = false;
+                    if text_content.is_none() {
+                        text_content = block.get("text")
+                            .and_then(|t| t.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string());
+                    }
+                }
+                _ => {
+                    has_thinking_only = false;
+                }
+            }
+        }
+
+        // Classify based on detected block types
+        if has_tool_use {
+            return (Some("tool_use".to_string()), Some("tool".to_string()), detected_tool_name, tool_input_preview.or(text_content));
+        }
+        if has_tool_result {
+            return (Some("tool_result".to_string()), Some("tool".to_string()), None, tool_result_content);
+        }
+        if has_thinking_only && !has_text {
+            return (Some("thinking".to_string()), role, None, None);
+        }
+        if has_text {
+            return (None, role, None, text_content);
+        }
+    }
+
+    // Content is a simple string — extract full text without truncation
+    let preview = match content {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        _ => extract_text_content(content),
+    };
+    (None, role, None, preview)
 }
 
 /// Parse a JSONL file into SessionEvent objects.
-fn parse_jsonl_events(jsonl_path: &PathBuf) -> Result<Vec<SessionEvent>, String> {
+fn parse_jsonl_events(jsonl_path: &PathBuf, after_index: Option<usize>) -> Result<Vec<SessionEvent>, String> {
     let file = File::open(jsonl_path)
         .map_err(|e| format!("Failed to open session file: {}", e))?;
     let reader = BufReader::new(file);
 
     let mut events = Vec::new();
     for (i, line) in reader.lines().enumerate() {
+        // Skip lines until past after_index (by line number)
+        if let Some(after) = after_index {
+            if i <= after {
+                continue;
+            }
+        }
+
         let line = match line {
             Ok(l) => l,
             Err(_) => continue,
@@ -527,8 +731,6 @@ fn parse_jsonl_events(jsonl_path: &PathBuf) -> Result<Vec<SessionEvent>, String>
         if line.trim().is_empty() {
             continue;
         }
-
-        let raw_json = line.clone();
 
         let parsed: serde_json::Value = match serde_json::from_str(&line) {
             Ok(v) => v,
@@ -539,66 +741,62 @@ fn parse_jsonl_events(jsonl_path: &PathBuf) -> Result<Vec<SessionEvent>, String>
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let msg_type = parsed.get("type")
+        let base_type = parsed.get("type")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
 
-        let role = parsed.get("message")
-            .and_then(|m| m.get("role"))
-            .and_then(|r| r.as_str())
-            .map(String::from);
+        // Classify based on actual message content blocks
+        let (override_type, effective_role, tool_name, content_preview) = classify_message_content(&parsed);
 
-        let content_preview = if let Some(message) = parsed.get("message") {
-            if let Some(content) = message.get("content") {
-                extract_text_content(content)
+        let event_type = override_type.unwrap_or(base_type);
+        let role = effective_role.or_else(|| {
+            parsed.get("message")
+                .and_then(|m| m.get("role"))
+                .and_then(|r| r.as_str())
+                .map(String::from)
+        });
+
+        // Fall back to subtype for non-message events
+        let content_preview = content_preview.or_else(|| {
+            if parsed.get("message").is_none() {
+                parsed.get("subtype")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
             } else {
                 None
             }
-        } else {
-            parsed.get("subtype")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        };
+        });
 
         events.push(SessionEvent {
             index: i,
             timestamp,
-            event_type: msg_type,
+            event_type,
             role,
+            tool_name,
             content_preview,
-            raw_json,
         });
     }
 
     Ok(events)
 }
 
-/// Read all events from a session JSONL file for the Event Inspector.
-/// If `project_dir_name` is provided, looks in that specific directory.
-/// If empty, scans all project directories for the session ID.
-/// If `agent_id` is provided, looks for the subagent file instead.
-pub fn get_session_events(session_id: &str, project_dir_name: &str, agent_id: &str) -> Result<Vec<SessionEvent>, String> {
+/// Resolve the JSONL file path for a session (or subagent).
+fn resolve_session_jsonl_path(session_id: &str, project_dir_name: &str, agent_id: &str) -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or("Cannot determine home directory")?;
 
-    // If agent_id is provided, look for subagent file
     if !agent_id.is_empty() {
         let subagent_filename = format!("agent-{}.jsonl", agent_id);
-        let subagent_path = home.join(".claude").join("projects")
-            .join(project_dir_name).join(session_id).join("subagents").join(&subagent_filename);
-        if subagent_path.exists() {
-            return parse_jsonl_events(&subagent_path);
+        if !project_dir_name.is_empty() {
+            let path = home.join(".claude").join("projects")
+                .join(project_dir_name).join(session_id).join("subagents").join(&subagent_filename);
+            if path.exists() { return Ok(path); }
         }
-        // Scan all project dirs if project_dir_name is empty
-        if project_dir_name.is_empty() {
-            let projects_dir = home.join(".claude").join("projects");
-            if let Ok(entries) = fs::read_dir(&projects_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path().join(session_id).join("subagents").join(&subagent_filename);
-                    if path.exists() {
-                        return parse_jsonl_events(&path);
-                    }
-                }
+        let projects_dir = home.join(".claude").join("projects");
+        if let Ok(entries) = fs::read_dir(&projects_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path().join(session_id).join("subagents").join(&subagent_filename);
+                if path.exists() { return Ok(path); }
             }
         }
         return Err("Subagent file not found".to_string());
@@ -606,49 +804,68 @@ pub fn get_session_events(session_id: &str, project_dir_name: &str, agent_id: &s
 
     let filename = format!("{}.jsonl", session_id);
 
-    // If project_dir_name is provided, look directly
     if !project_dir_name.is_empty() {
-        let jsonl_path = home.join(".claude").join("projects").join(project_dir_name).join(&filename);
-        if jsonl_path.exists() {
-            return parse_jsonl_events(&jsonl_path);
-        }
-        // Try archive
+        let path = home.join(".claude").join("projects").join(project_dir_name).join(&filename);
+        if path.exists() { return Ok(path); }
         if let Some(archive_dir) = get_archive_base_dir() {
-            let archive_path = archive_dir.join(project_dir_name).join(&filename);
-            if archive_path.exists() {
-                return parse_jsonl_events(&archive_path);
-            }
+            let path = archive_dir.join(project_dir_name).join(&filename);
+            if path.exists() { return Ok(path); }
         }
     }
 
-    // Scan all project directories for the session ID
     let projects_dir = home.join(".claude").join("projects");
     if projects_dir.exists() {
         if let Ok(entries) = fs::read_dir(&projects_dir) {
             for entry in entries.flatten() {
                 let path = entry.path().join(&filename);
-                if path.exists() {
-                    return parse_jsonl_events(&path);
-                }
+                if path.exists() { return Ok(path); }
             }
         }
     }
 
-    // Try archive directories
     if let Some(archive_dir) = get_archive_base_dir() {
         if archive_dir.exists() {
             if let Ok(entries) = fs::read_dir(&archive_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path().join(&filename);
-                    if path.exists() {
-                        return parse_jsonl_events(&path);
-                    }
+                    if path.exists() { return Ok(path); }
                 }
             }
         }
     }
 
     Err("Session file not found".to_string())
+}
+
+/// Read all events from a session JSONL file for the Event Inspector.
+pub fn get_session_events(session_id: &str, project_dir_name: &str, agent_id: &str, after_index: Option<usize>) -> Result<Vec<SessionEvent>, String> {
+    let path = resolve_session_jsonl_path(session_id, project_dir_name, agent_id)?;
+    parse_jsonl_events(&path, after_index)
+}
+
+/// Read a single raw JSON line from a JSONL file by event index.
+pub fn get_event_raw_json(session_id: &str, project_dir_name: &str, event_index: usize, agent_id: &str) -> Result<String, String> {
+    let path = resolve_session_jsonl_path(session_id, project_dir_name, agent_id)?;
+    let file = File::open(&path).map_err(|e| format!("Failed to open: {}", e))?;
+    let reader = BufReader::new(file);
+
+    let mut current_index: usize = 0;
+    for (i, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| format!("Read error: {}", e))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        // The event index corresponds to the line number (i), not a filtered counter
+        if i == event_index {
+            // Pretty-format the JSON
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
+                return serde_json::to_string_pretty(&parsed).map_err(|e| e.to_string());
+            }
+            return Ok(line);
+        }
+        current_index = i;
+    }
+    Err(format!("Event index {} not found (last was {})", event_index, current_index))
 }
 
 /// Get the archive base directory path.
