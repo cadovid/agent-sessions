@@ -507,8 +507,207 @@ pub struct SessionEvent {
     pub timestamp: Option<String>,
     pub event_type: String,
     pub role: Option<String>,
+    pub tool_name: Option<String>,
     pub content_preview: Option<String>,
     pub raw_json: String,
+}
+
+/// Build a human-readable preview for a tool_use event from its name and input.
+fn build_tool_preview(name: &str, input: &serde_json::Value) -> String {
+    match name {
+        "Agent" | "SendMessage" => {
+            let mut parts = vec![format!("**{}**", name)];
+            if let Some(desc) = input.get("description").and_then(|d| d.as_str()) {
+                parts.push(format!("**Description:** {}", desc));
+            }
+            if let Some(st) = input.get("subagent_type").and_then(|s| s.as_str()) {
+                parts.push(format!("**Type:** {}", st));
+            }
+            if let Some(prompt) = input.get("prompt").and_then(|p| p.as_str()) {
+                parts.push(format!("**Prompt:**\n\n```text\n{}\n```", prompt));
+            }
+            // SendMessage
+            if let Some(to) = input.get("to").and_then(|t| t.as_str()) {
+                parts.push(format!("**To:** {}", to));
+            }
+            if let Some(msg) = input.get("message").and_then(|m| m.as_str()) {
+                parts.push(format!("**Message:**\n\n```text\n{}\n```", msg));
+            }
+            parts.join("\n\n")
+        }
+        "Edit" => {
+            let file = input.get("file_path").and_then(|f| f.as_str()).unwrap_or("unknown");
+            let mut parts = vec![format!("**Edit:** `{}`", file)];
+            // Build a unified diff from old_string -> new_string
+            let old = input.get("old_string").and_then(|s| s.as_str()).unwrap_or("");
+            let new = input.get("new_string").and_then(|s| s.as_str()).unwrap_or("");
+            if !old.is_empty() || !new.is_empty() {
+                let mut diff_lines = vec!["```diff".to_string()];
+                for line in old.lines() {
+                    diff_lines.push(format!("- {}", line));
+                }
+                for line in new.lines() {
+                    diff_lines.push(format!("+ {}", line));
+                }
+                diff_lines.push("```".to_string());
+                parts.push(diff_lines.join("\n"));
+            }
+            parts.join("\n\n")
+        }
+        "Write" => {
+            let file = input.get("file_path").and_then(|f| f.as_str()).unwrap_or("unknown");
+            let content = input.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            let preview: String = content.chars().take(2000).collect();
+            format!("**Write:** `{}`\n\n```\n{}\n```", file, preview)
+        }
+        "Bash" | "PowerShell" => {
+            let cmd = input.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            format!("```bash\n{}\n```", cmd)
+        }
+        "Read" => {
+            let file = input.get("file_path").and_then(|f| f.as_str()).unwrap_or("unknown");
+            let mut s = format!("**Read:** `{}`", file);
+            if let Some(offset) = input.get("offset").and_then(|o| o.as_u64()) {
+                s.push_str(&format!(" (offset: {})", offset));
+            }
+            if let Some(limit) = input.get("limit").and_then(|l| l.as_u64()) {
+                s.push_str(&format!(" (limit: {})", limit));
+            }
+            s
+        }
+        "Glob" => {
+            let pattern = input.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
+            format!("**Glob:** `{}`", pattern)
+        }
+        "Grep" => {
+            let pattern = input.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
+            let path = input.get("path").and_then(|p| p.as_str()).unwrap_or("");
+            if path.is_empty() {
+                format!("**Grep:** `{}`", pattern)
+            } else {
+                format!("**Grep:** `{}` in `{}`", pattern, path)
+            }
+        }
+        "WebFetch" => {
+            let url = input.get("url").and_then(|u| u.as_str()).unwrap_or("");
+            format!("**WebFetch:** {}", url)
+        }
+        "WebSearch" => {
+            let query = input.get("query").and_then(|q| q.as_str()).unwrap_or("");
+            format!("**WebSearch:** {}", query)
+        }
+        _ => {
+            // Generic: show tool name + file_path or pattern if present
+            if let Some(fp) = input.get("file_path").and_then(|f| f.as_str()) {
+                format!("{}: {}", name, fp)
+            } else if let Some(p) = input.get("pattern").and_then(|p| p.as_str()) {
+                format!("{}: {}", name, p)
+            } else {
+                name.to_string()
+            }
+        }
+    }
+}
+
+/// Detect the actual content type from message.content blocks.
+/// Returns (effective_event_type, effective_role, tool_name, content_preview).
+fn classify_message_content(parsed: &serde_json::Value) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+    let message = match parsed.get("message") {
+        Some(m) => m,
+        None => return (None, None, None, None),
+    };
+
+    let role = message.get("role").and_then(|r| r.as_str()).map(String::from);
+    let content = match message.get("content") {
+        Some(c) => c,
+        None => return (None, role, None, None),
+    };
+
+    // If content is an array, inspect the block types
+    if let Some(arr) = content.as_array() {
+        let mut has_tool_use = false;
+        let mut has_tool_result = false;
+        let mut has_thinking_only = true;
+        let mut has_text = false;
+        let mut detected_tool_name: Option<String> = None;
+        let mut tool_input_preview: Option<String> = None;
+        let mut tool_result_content: Option<String> = None;
+        let mut text_content: Option<String> = None;
+
+        for block in arr {
+            let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            match block_type {
+                "tool_use" => {
+                    has_tool_use = true;
+                    has_thinking_only = false;
+                    let name = block.get("name").and_then(|n| n.as_str()).unwrap_or("Tool");
+                    detected_tool_name = Some(name.to_string());
+                    // Build preview from tool input
+                    if let Some(input) = block.get("input") {
+                        tool_input_preview = Some(build_tool_preview(name, input));
+                    } else {
+                        tool_input_preview = Some(name.to_string());
+                    }
+                }
+                "tool_result" => {
+                    has_tool_result = true;
+                    has_thinking_only = false;
+                    // Extract content from tool_result block (no truncation — inspector shows full content)
+                    if let Some(c) = block.get("content") {
+                        if let Some(s) = c.as_str() {
+                            tool_result_content = Some(s.to_string());
+                        } else if let Some(arr) = c.as_array() {
+                            for item in arr {
+                                if item.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                    if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
+                                        tool_result_content = Some(t.to_string());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                "thinking" => {
+                    // thinking blocks — no useful content
+                }
+                "text" => {
+                    has_text = true;
+                    has_thinking_only = false;
+                    if text_content.is_none() {
+                        text_content = block.get("text")
+                            .and_then(|t| t.as_str())
+                            .filter(|s| !s.is_empty())
+                            .map(|s| s.to_string());
+                    }
+                }
+                _ => {
+                    has_thinking_only = false;
+                }
+            }
+        }
+
+        // Classify based on detected block types
+        if has_tool_use {
+            return (Some("tool_use".to_string()), Some("tool".to_string()), detected_tool_name, tool_input_preview.or(text_content));
+        }
+        if has_tool_result {
+            return (Some("tool_result".to_string()), Some("tool".to_string()), None, tool_result_content);
+        }
+        if has_thinking_only && !has_text {
+            return (Some("thinking".to_string()), role, None, None);
+        }
+        if has_text {
+            return (None, role, None, text_content);
+        }
+    }
+
+    // Content is a simple string — extract full text without truncation
+    let preview = match content {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        _ => extract_text_content(content),
+    };
+    (None, role, None, preview)
 }
 
 /// Parse a JSONL file into SessionEvent objects.
@@ -539,33 +738,39 @@ fn parse_jsonl_events(jsonl_path: &PathBuf) -> Result<Vec<SessionEvent>, String>
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let msg_type = parsed.get("type")
+        let base_type = parsed.get("type")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
 
-        let role = parsed.get("message")
-            .and_then(|m| m.get("role"))
-            .and_then(|r| r.as_str())
-            .map(String::from);
+        // Classify based on actual message content blocks
+        let (override_type, effective_role, tool_name, content_preview) = classify_message_content(&parsed);
 
-        let content_preview = if let Some(message) = parsed.get("message") {
-            if let Some(content) = message.get("content") {
-                extract_text_content(content)
+        let event_type = override_type.unwrap_or(base_type);
+        let role = effective_role.or_else(|| {
+            parsed.get("message")
+                .and_then(|m| m.get("role"))
+                .and_then(|r| r.as_str())
+                .map(String::from)
+        });
+
+        // Fall back to subtype for non-message events
+        let content_preview = content_preview.or_else(|| {
+            if parsed.get("message").is_none() {
+                parsed.get("subtype")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
             } else {
                 None
             }
-        } else {
-            parsed.get("subtype")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        };
+        });
 
         events.push(SessionEvent {
             index: i,
             timestamp,
-            event_type: msg_type,
+            event_type,
             role,
+            tool_name,
             content_preview,
             raw_json,
         });
