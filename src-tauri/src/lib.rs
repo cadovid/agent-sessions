@@ -6,6 +6,7 @@ pub mod logging;
 pub mod process;
 pub mod session;
 pub mod terminal;
+pub mod usage;
 
 #[cfg(test)]
 mod tests;
@@ -17,7 +18,7 @@ use tauri::{
 };
 use std::sync::Mutex;
 
-use commands::{get_all_sessions, focus_session, update_tray_title, register_shortcut, unregister_shortcut, kill_session, get_session_history, resume_session, delete_history_session, open_in_editor, archive_session, update_tray_menu, get_session_events, get_event_raw_json};
+use commands::{get_all_sessions, focus_session, update_tray_title, register_shortcut, unregister_shortcut, kill_session, get_session_history, resume_session, delete_history_session, open_in_editor, archive_session, update_tray_menu, get_session_events, get_event_raw_json, fetch_usage, get_cached_usage, update_tray_icon};
 
 // Store tray icon ID for updates
 static TRAY_ID: Mutex<Option<String>> = Mutex::new(None);
@@ -30,7 +31,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![get_all_sessions, focus_session, update_tray_title, register_shortcut, unregister_shortcut, kill_session, get_session_history, resume_session, delete_history_session, open_in_editor, archive_session, update_tray_menu, get_session_events, get_event_raw_json])
+        .invoke_handler(tauri::generate_handler![get_all_sessions, focus_session, update_tray_title, register_shortcut, unregister_shortcut, kill_session, get_session_history, resume_session, delete_history_session, open_in_editor, archive_session, update_tray_menu, get_session_events, get_event_raw_json, fetch_usage, get_cached_usage, update_tray_icon])
         .setup(|app| {
             // Create menu for tray
             let show_item = MenuItemBuilder::with_id("show", "Show Window")

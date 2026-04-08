@@ -57,6 +57,27 @@ export interface SessionHistoryResponse {
   projects: ProjectHistory[];
 }
 
+export interface UsageWindow {
+  utilization: number;
+  resetsAt: string | null;
+}
+
+export interface ExtraUsage {
+  isEnabled: boolean;
+  monthlyLimit: number;
+  usedCredits: number;
+}
+
+export interface UsageResponse {
+  fiveHour: UsageWindow | null;
+  sevenDay: UsageWindow | null;
+  sevenDayOpus: UsageWindow | null;
+  sevenDaySonnet: UsageWindow | null;
+  extraUsage: ExtraUsage | null;
+  fetchedAt: string;
+  error: string | null;
+}
+
 export interface SessionEvent {
   index: number;
   timestamp: string | null;

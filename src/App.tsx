@@ -4,6 +4,8 @@ import { Settings, useHotkeyInit } from './components/Settings';
 import { useSessions } from './hooks/useSessions';
 import { HistoryPanel } from './components/HistoryPanel';
 import { useSessionHistory } from './hooks/useSessionHistory';
+import { useUsage } from './hooks/useUsage';
+import { UsageStrip } from './components/UsageStrip';
 import { Button } from '@/components/ui/button';
 import { Session } from './types/session';
 
@@ -46,6 +48,8 @@ function App() {
     resumeSession,
     deleteSession,
   } = useSessionHistory();
+
+  const { usage, isLoading: usageLoading, refresh: refreshUsage } = useUsage();
 
   // Initialize hotkey on app start
   useHotkeyInit();
@@ -95,7 +99,9 @@ function App() {
             </div>
           )}
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-3">
+          <UsageStrip usage={usage} isLoading={usageLoading} onRefresh={refreshUsage} />
+          <div className="flex items-center gap-1">
           <Button
             variant="ghost"
             size="icon-sm"
@@ -128,6 +134,7 @@ function App() {
               />
             </svg>
           </Button>
+          </div>
         </div>
       </header>
 
