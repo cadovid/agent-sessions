@@ -4,7 +4,9 @@ use std::sync::Mutex;
 
 use crate::session::{get_sessions, SessionsResponse};
 use crate::session::history;
+use crate::session::memory;
 use crate::terminal;
+use crate::usage;
 
 // Store current shortcut for unregistration
 static CURRENT_SHORTCUT: Mutex<Option<Shortcut>> = Mutex::new(None);
@@ -22,16 +24,37 @@ pub fn focus_session(pid: u32, project_path: String) -> Result<(), String> {
         .or_else(|_| terminal::focus_terminal_by_path(&project_path))
 }
 
-/// Update the tray icon title with session counts
+/// Update the tray icon title with session counts and usage
 #[tauri::command]
 pub fn update_tray_title(app: tauri::AppHandle, total: usize, waiting: usize) -> Result<(), String> {
-    let title = if waiting > 0 {
-        format!("{} ({} idle)", total, waiting)
-    } else if total > 0 {
-        format!("{}", total)
-    } else {
-        String::new()
-    };
+    let mut parts = Vec::new();
+
+    // Session counts
+    if total > 0 {
+        if waiting > 0 {
+            parts.push(format!("{} ({} idle)", total, waiting));
+        } else {
+            parts.push(format!("{}", total));
+        }
+    }
+
+    // Usage from cache
+    if let Some(u) = usage::get_cached_usage() {
+        if u.error.is_none() {
+            let mut usage_parts = Vec::new();
+            if let Some(ref fh) = u.five_hour {
+                usage_parts.push(format!("5h:{}%", fh.utilization as u32));
+            }
+            if let Some(ref sd) = u.seven_day {
+                usage_parts.push(format!("7d:{}%", sd.utilization as u32));
+            }
+            if !usage_parts.is_empty() {
+                parts.push(usage_parts.join(" "));
+            }
+        }
+    }
+
+    let title = parts.join(" · ");
 
     if let Some(tray) = app.tray_by_id("main-tray") {
         tray.set_title(Some(&title))
@@ -135,7 +158,7 @@ pub struct TraySessionInfo {
     pub status: String,
 }
 
-/// Rebuild the tray menu with the current session list
+/// Rebuild the tray menu with the current session list and usage info
 #[tauri::command]
 pub fn update_tray_menu(app: tauri::AppHandle, sessions: Vec<TraySessionInfo>) -> Result<(), String> {
     use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -144,6 +167,27 @@ pub fn update_tray_menu(app: tauri::AppHandle, sessions: Vec<TraySessionInfo>) -
     let idle_count = sessions.iter().filter(|s| s.status == "idle").count();
 
     let mut builder = MenuBuilder::new(&app);
+
+    // Usage info (from cache)
+    if let Some(usage) = usage::get_cached_usage() {
+        if usage.error.is_none() {
+            let mut usage_parts = Vec::new();
+            if let Some(ref fh) = usage.five_hour {
+                usage_parts.push(format!("5h: {}% used", fh.utilization as u32));
+            }
+            if let Some(ref sd) = usage.seven_day {
+                usage_parts.push(format!("7d: {}% used", sd.utilization as u32));
+            }
+            if !usage_parts.is_empty() {
+                let label = usage_parts.join("  |  ");
+                let item = MenuItemBuilder::with_id("usage", &label)
+                    .enabled(false)
+                    .build(&app)
+                    .map_err(|e| e.to_string())?;
+                builder = builder.item(&item).separator();
+            }
+        }
+    }
 
     // Header with counts
     if !sessions.is_empty() {
@@ -239,4 +283,42 @@ pub fn resume_session(session_id: String, project_path: String) -> Result<(), St
         let _ = (session_id, project_path);
         Err("Resume session is only supported on Linux with Zellij".to_string())
     }
+}
+
+/// Update the tray icon with a colored status dot based on usage
+#[tauri::command]
+pub fn update_tray_icon(app: tauri::AppHandle) -> Result<(), String> {
+    let base_png = include_bytes!("../../icons/tray-icon.png");
+    if let Some((rgba, width, height)) = usage::generate_tray_icon_with_dot(base_png) {
+        let image = tauri::image::Image::new_owned(rgba, width, height);
+        if let Some(tray) = app.tray_by_id("main-tray") {
+            tray.set_icon(Some(image))
+                .map_err(|e| format!("Failed to set tray icon: {}", e))?;
+        }
+    }
+    Ok(())
+}
+
+/// Fetch Claude Code usage limits from the API
+#[tauri::command]
+pub fn fetch_usage() -> usage::UsageResponse {
+    usage::fetch_usage()
+}
+
+/// Get cached usage (no API call)
+#[tauri::command]
+pub fn get_cached_usage() -> Option<usage::UsageResponse> {
+    usage::get_cached_usage()
+}
+
+/// Get all memory files for a project
+#[tauri::command]
+pub fn get_project_memory(project_dir_name: String) -> Result<memory::ProjectMemory, String> {
+    memory::get_project_memory(&project_dir_name)
+}
+
+/// Delete a single memory file
+#[tauri::command]
+pub fn delete_memory_file(project_dir_name: String, filename: String) -> Result<(), String> {
+    memory::delete_memory_file(&project_dir_name, &filename)
 }

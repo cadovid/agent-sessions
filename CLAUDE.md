@@ -1,12 +1,44 @@
 ## Releasing a new version
 
-1. Bump version in `src-tauri/tauri.conf.json` and `package.json`
-2. Update `CHANGELOG.md` with the new version and changes
-3. Commit and push
-4. Run `source .env && scripts/release.sh`
+The release process is automated via GitHub Actions on tag push.
 
-The `.env` file contains Apple credentials (`APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`) needed for notarization.
+1. Bump the version with the helper script (updates `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and the README badge in one shot):
 
-The release script builds both aarch64 and x64, signs, creates DMGs, notarizes with Apple, publishes a GitHub release, and updates the Homebrew tap (`ozankasikci/homebrew-tap`).
+   ```bash
+   ./scripts/bump-version.sh patch   # 1.0.0 -> 1.0.1
+   ./scripts/bump-version.sh minor   # 1.0.0 -> 1.1.0
+   ./scripts/bump-version.sh major   # 1.0.0 -> 2.0.0
+   ./scripts/bump-version.sh 1.2.3   # explicit version
+   ```
 
-If a build already exists, use `--skip-build` to only sign/notarize/publish. Other flags: `--skip-notarize`, `--skip-github`, `--skip-homebrew`, `--arch aarch64|x64`.
+2. Update `CHANGELOG.md` with the new version and changes.
+3. Commit the version bump and changelog.
+4. Tag the release and push:
+
+   ```bash
+   git tag v1.2.3
+   git push --tags
+   ```
+
+The `.github/workflows/release.yml` workflow then:
+
+- Re-applies the version to source files (idempotent with the bump-version script)
+- Installs Linux build dependencies, runs the Rust test suite
+- Builds the AppImage via `npm run tauri build -- --bundles appimage`
+- Publishes a GitHub Release with auto-generated release notes and attaches the AppImage
+
+No manual signing, notarization, or third-party tap is involved — the only artifact is the Linux AppImage on the Releases page.
+
+## Local development
+
+```bash
+npm install
+npm run tauri dev               # dev server with hot reload
+npm run tauri build -- --bundles appimage   # build the AppImage locally
+```
+
+Rust tests:
+
+```bash
+cd src-tauri && cargo test
+```

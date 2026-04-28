@@ -51,10 +51,46 @@ export interface ProjectHistory {
   projectName: string;
   projectDirName: string;
   sessions: HistorySession[];
+  hasMemory: boolean;
+}
+
+export interface MemoryFile {
+  filename: string;
+  name: string | null;
+  description: string | null;
+  memoryType: string | null;
+  content: string;
+  sizeBytes: number;
+}
+
+export interface ProjectMemory {
+  projectDirName: string;
+  files: MemoryFile[];
 }
 
 export interface SessionHistoryResponse {
   projects: ProjectHistory[];
+}
+
+export interface UsageWindow {
+  utilization: number;
+  resetsAt: string | null;
+}
+
+export interface ExtraUsage {
+  isEnabled: boolean;
+  monthlyLimit: number;
+  usedCredits: number;
+}
+
+export interface UsageResponse {
+  fiveHour: UsageWindow | null;
+  sevenDay: UsageWindow | null;
+  sevenDayOpus: UsageWindow | null;
+  sevenDaySonnet: UsageWindow | null;
+  extraUsage: ExtraUsage | null;
+  fetchedAt: string;
+  error: string | null;
 }
 
 export interface SessionEvent {

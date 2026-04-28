@@ -26,9 +26,12 @@ export function useSessionHistory() {
       setResumeError(null);
       await invoke('resume_session', { sessionId, projectPath: cwd });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Failed to resume session';
+      // Tauri returns Err(String) as a plain string, not an Error object
+      const message = typeof err === 'string' ? err
+        : err instanceof Error ? err.message
+        : 'Failed to resume session';
       setResumeError(message);
-      setTimeout(() => setResumeError(null), 5000);
+      setTimeout(() => setResumeError(null), 8000);
     }
   }, []);
 

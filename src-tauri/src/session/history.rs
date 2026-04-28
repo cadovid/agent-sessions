@@ -21,6 +21,7 @@ pub struct ProjectHistory {
     pub project_name: String,
     pub project_dir_name: String,
     pub sessions: Vec<HistorySession>,
+    pub has_memory: bool,
 }
 
 /// A single past session
@@ -365,11 +366,13 @@ fn scan_project_directories(base_dir: &PathBuf) -> Vec<ProjectHistory> {
             .unwrap_or("Unknown")
             .to_string();
 
+        let has_memory = super::memory::project_has_memory(&dir_name);
         projects.push(ProjectHistory {
             project_path,
             project_name,
             project_dir_name: dir_name,
             sessions,
+            has_memory,
         });
     }
 
