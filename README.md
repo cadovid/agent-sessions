@@ -29,14 +29,35 @@ A desktop app to monitor, browse, and inspect your Claude Code sessions in real-
 - Per-session actions: resume in new Zellij tab, star/favorite, inspect, delete (with confirmation)
 
 ### Event Inspector
-- Full JSONL event viewer for any session (history or active)
-- Draggable, resizable floating panel with split-pane layout
+- Full JSONL event viewer for any session (history, active, or subagent)
+- Draggable, resizable floating panel with split-pane layout and virtual scrolling
 - Role filters: All / User / Assistant / Tools / System
-- Semantic type filters: Code / Plan / Diff (auto-detected from tool usage and content patterns)
+- Semantic type filters: Search / Edit / Execute / Plan / Diff / Web / Agent (auto-detected from tool name and content patterns)
 - Navigation pills to jump between event types (User, Assistant, Tool, System)
 - Search with match highlighting (yellow) in event list, detail panel, and raw JSON
 - Pretty view (markdown rendered) and Raw JSON view with copy-to-clipboard
-- Live refresh (3-second polling) for active sessions with LIVE indicator
+- Live refresh (3-second polling) for active sessions with LIVE indicator, incremental fetch (only new events)
+- Lazy raw JSON loading — only fetched on demand to keep memory low
+
+### Memory Inspector
+- Per-project memory browser for `~/.claude/projects/<dir>/memory/` files
+- Open-book icon appears in each project group header when memory exists
+- Draggable, resizable dialog mirroring the Event Inspector layout
+- Type filters with counts: All / Index / Feedback / User / Project / Reference
+- Search across filename, frontmatter (`name`, `description`), and full file content with yellow highlighting
+- Pretty view renders all frontmatter fields in a structured metadata block, then the markdown body
+- Raw view shows the full file (frontmatter + body) for direct inspection
+- Delete individual memory files with confirmation (path-traversal protected)
+
+### Claude Code Usage Tracking
+- Reads OAuth token from `~/.claude/.credentials.json` and queries `https://api.anthropic.com/api/oauth/usage`
+- Compact usage meters in the app header for the 5-hour, 7-day, Opus, and Sonnet windows
+- Color-coded bars (green / amber / red) showing % used + reset countdown
+- Tray menu shows usage line at the top of the dropdown
+- Tray title appends usage info (e.g. `2 (2 idle) · 5h:31% 7d:9%`)
+- Dynamic tray icon: anti-aliased colored status dot (green/amber/red/gray) overlaid in the bottom-right corner
+- Manual refresh button + automatic poll every 15 minutes
+- Auto-handles token refresh (spawns `claude /status` on 401)
 
 ### Subagent Hierarchy
 - Detects parent-child relationships from `<session>/subagents/` directories
@@ -56,11 +77,12 @@ A desktop app to monitor, browse, and inspect your Claude Code sessions in real-
 - File paths render in green, URLs in blue
 
 ### System Tray
-- Persistent tray icon with session count in title
-- Right-click menu shows all active sessions with status indicators
+- Persistent tray icon with dynamic colored status dot reflecting Claude Code usage level (green / amber / red)
+- Tray title shows session counts and usage at a glance: `2 (2 idle) · 5h:31% 7d:9%`
+- Right-click menu shows usage line, all active sessions with status indicators (● active / ○ idle), Show Window, and Quit
 - Click a session in the menu to focus its terminal
 - Sessions display custom names when set
-- Show Window / Quit actions
+- Menu only rebuilds when sessions actually change (avoids unnecessary IPC overhead)
 
 ### Visual Design
 - Dark theme with three-zone depth layering (header / content / sidebar)
@@ -113,9 +135,10 @@ Basic tmux support with `select-pane` for terminal focusing.
 - **Tauri 2.x** (Rust backend + React frontend)
 - **React + TypeScript** with Vite
 - **Tailwind CSS + shadcn/ui** components
-- **react-markdown + remark-gfm** for message rendering
-- **sysinfo** crate for cross-platform process discovery
-- **SQLite** (rusqlite, bundled) available for future indexing
+- **react-markdown + remark-gfm** for message rendering (lazy-loaded with the inspectors to keep the initial bundle small)
+- **sysinfo** crate for cross-platform process discovery (single shared instance, refreshed once per poll cycle)
+- **ureq** for the synchronous HTTP call to Anthropic's usage API
+- **png** crate for decoding the tray icon at runtime to overlay the colored status dot
 
 ## License
 
