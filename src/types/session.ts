@@ -51,6 +51,21 @@ export interface ProjectHistory {
   projectName: string;
   projectDirName: string;
   sessions: HistorySession[];
+  hasMemory: boolean;
+}
+
+export interface MemoryFile {
+  filename: string;
+  name: string | null;
+  description: string | null;
+  memoryType: string | null;
+  content: string;
+  sizeBytes: number;
+}
+
+export interface ProjectMemory {
+  projectDirName: string;
+  files: MemoryFile[];
 }
 
 export interface SessionHistoryResponse {

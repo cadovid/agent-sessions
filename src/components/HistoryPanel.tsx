@@ -13,6 +13,7 @@ import {
 import { Markdown } from './Markdown';
 import { lazy, Suspense } from 'react';
 const EventInspector = lazy(() => import('./EventInspector'));
+const MemoryInspector = lazy(() => import('./MemoryInspector'));
 
 const HISTORY_PANEL_EXPANDED_KEY = 'agent-sessions-history-panel-expanded';
 const HISTORY_PANEL_WIDTH_KEY = 'agent-sessions-history-panel-width';
@@ -586,6 +587,8 @@ function groupSessionsByDate(sessions: HistorySession[]): { label: string; sessi
 }
 
 function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDeleteSession, favoriteIds, onToggleFavorite, customNamesMap }: ProjectGroupProps) {
+  const [memoryOpen, setMemoryOpen] = useState(false);
+
   const handleDelete = useCallback((sessionId: string) => {
     onDeleteSession(sessionId, project.projectDirName);
   }, [onDeleteSession, project.projectDirName]);
@@ -594,28 +597,46 @@ function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDelet
     onToggleFavorite(sessionId, project.projectDirName);
   }, [onToggleFavorite, project.projectDirName]);
 
+  const handleMemoryClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setMemoryOpen(true);
+  }, []);
+
   const dateGroups = useMemo(() => groupSessionsByDate(project.sessions), [project.sessions]);
   const accentColor = useMemo(() => getProjectAccentColor(project.projectName), [project.projectName]);
 
   return (
     <div className="mb-1 rounded-md overflow-hidden">
-      <button
-        onClick={() => onToggle(project.projectPath)}
-        className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded hover:bg-muted/30 transition-colors group"
-      >
-        <ChevronDownIcon collapsed={isCollapsed} />
-        <div className="flex-1 min-w-0 text-left">
-          <div className="text-xs font-medium text-foreground truncate">
-            {project.projectName}
+      <div className="w-full flex items-center gap-1.5 px-2 py-1.5 rounded hover:bg-muted/30 transition-colors group">
+        <button
+          onClick={() => onToggle(project.projectPath)}
+          className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
+        >
+          <ChevronDownIcon collapsed={isCollapsed} />
+          <div className="flex-1 min-w-0">
+            <div className="text-xs font-medium text-foreground truncate">
+              {project.projectName}
+            </div>
+            <div className="text-xs text-muted-foreground truncate">
+              {shortenPath(project.projectPath)}
+            </div>
           </div>
-          <div className="text-xs text-muted-foreground truncate">
-            {shortenPath(project.projectPath)}
-          </div>
-        </div>
+        </button>
+        {project.hasMemory && (
+          <button
+            onClick={handleMemoryClick}
+            className="shrink-0 p-1 rounded text-muted-foreground/60 hover:text-purple-400 hover:bg-purple-400/10 transition-colors"
+            title="Inspect project memory"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+            </svg>
+          </button>
+        )}
         <span className="text-xs text-muted-foreground shrink-0 ml-1">
           {project.sessions.length}
         </span>
-      </button>
+      </div>
       {!isCollapsed && (
         <div className="ml-4 mr-1 mb-1 space-y-0.5 border-l border-border/40 pl-2">
           {dateGroups.map((group) => (
@@ -639,6 +660,19 @@ function ProjectGroup({ project, isCollapsed, onToggle, onResumeSession, onDelet
             </div>
           ))}
         </div>
+      )}
+
+      {/* Memory Inspector (lazy loaded) */}
+      {memoryOpen && (
+        <Suspense fallback={null}>
+          <MemoryInspector
+            open={memoryOpen}
+            onClose={() => setMemoryOpen(false)}
+            projectDirName={project.projectDirName}
+            projectName={project.projectName}
+            accentColor={accentColor}
+          />
+        </Suspense>
       )}
     </div>
   );

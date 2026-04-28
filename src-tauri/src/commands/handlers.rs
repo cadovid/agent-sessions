@@ -4,6 +4,7 @@ use std::sync::Mutex;
 
 use crate::session::{get_sessions, SessionsResponse};
 use crate::session::history;
+use crate::session::memory;
 use crate::terminal;
 use crate::usage;
 
@@ -308,4 +309,16 @@ pub fn fetch_usage() -> usage::UsageResponse {
 #[tauri::command]
 pub fn get_cached_usage() -> Option<usage::UsageResponse> {
     usage::get_cached_usage()
+}
+
+/// Get all memory files for a project
+#[tauri::command]
+pub fn get_project_memory(project_dir_name: String) -> Result<memory::ProjectMemory, String> {
+    memory::get_project_memory(&project_dir_name)
+}
+
+/// Delete a single memory file
+#[tauri::command]
+pub fn delete_memory_file(project_dir_name: String, filename: String) -> Result<(), String> {
+    memory::delete_memory_file(&project_dir_name, &filename)
 }
