@@ -20,9 +20,30 @@ fn get_parent_pid(pid: u32) -> Option<u32> {
 
 /// Get the first active Zellij session name, or None if no sessions exist.
 /// This works even when called from outside Zellij (e.g., from the desktop app).
+/// Strip ANSI escape sequences from a string.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // ESC sequence: consume until we hit a letter (m, K, etc.)
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&n) = chars.peek() {
+                    chars.next();
+                    if n.is_ascii_alphabetic() { break; }
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn get_zellij_session() -> Option<String> {
     let output = Command::new("zellij")
-        .args(["list-sessions", "-n", "-s"])
+        .args(["list-sessions"])
         .output()
         .ok()?;
 
@@ -30,8 +51,28 @@ fn get_zellij_session() -> Option<String> {
         return None;
     }
 
-    let sessions = String::from_utf8_lossy(&output.stdout);
-    sessions.lines().next().map(|s| s.trim().to_string())
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let mut current_session: Option<String> = None;
+    let mut first_active: Option<String> = None;
+
+    for line in raw.lines() {
+        let clean = strip_ansi(line);
+        // Skip exited sessions
+        if clean.contains("EXITED") {
+            continue;
+        }
+        // Extract session name (first whitespace-separated token)
+        let name = clean.split_whitespace().next()?.to_string();
+        if clean.contains("(current)") {
+            current_session = Some(name);
+            break;
+        }
+        if first_active.is_none() {
+            first_active = Some(name);
+        }
+    }
+
+    current_session.or(first_active)
 }
 
 /// Check if the target pane is already focused by parsing dump-layout output.
